@@ -16,6 +16,20 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Hardcover setup
+
+This app expects a Hardcover personal access token on the server. Create a `.env.local` file in the project root and set:
+
+```bash
+HARDCOVER_API_KEY=your_token_here
+```
+
+You can copy the provided `.env.local.example` file as a starting point.
+
+## What the app does
+
+Type a book title, choose a match from the dropdown, and the selected book's cover will render on the right. The browser talks to local API routes only; those routes forward requests to Hardcover with your token.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
