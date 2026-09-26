@@ -288,7 +288,7 @@ export default function Home() {
     cursor.style.backgroundRepeat = "no-repeat";
     cursor.style.backgroundSize = "cover";
     cursor.style.pointerEvents = "none";
-    cursor.style.zIndex = "2147483647";
+    cursor.style.zIndex = "20";
 
     const nameTag = document.createElement("div");
     nameTag.textContent = activeName || "reader";
@@ -325,6 +325,14 @@ export default function Home() {
       document.body.style.removeProperty("cursor");
     };
   }, [activeCursorImage, activeName]);
+
+  useEffect(() => {
+    document.body.classList.toggle("profile-modal-open", modalOpen);
+
+    return () => {
+      document.body.classList.remove("profile-modal-open");
+    };
+  }, [modalOpen]);
 
   useEffect(() => {
     const normalized = bookQuery.trim();
@@ -444,7 +452,10 @@ export default function Home() {
       </button>
 
       {modalOpen ? (
-        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/45 p-4">
+        <div
+          className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          style={{ zIndex: 2147483647 }}
+        >
           <form
             onSubmit={applyProfile}
             className="w-full max-w-xl bg-white p-5 text-black"

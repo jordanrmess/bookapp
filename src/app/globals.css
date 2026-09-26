@@ -39,6 +39,18 @@ a {
   text-decoration: none;
 }
 
+body.profile-modal-open .playhtml-cursor,
+body.profile-modal-open .playhtml-cursor-other,
+body.profile-modal-open .local-book-cover-cursor {
+  z-index: 20 !important;
+  pointer-events: none !important;
+}
+
+body.profile-modal-open [class*="playhtml-cursor"] {
+  z-index: 20 !important;
+  pointer-events: none !important;
+}
+
 .dropdown-item {
   cursor: pointer;
   width: 100%;
