@@ -83,7 +83,7 @@ function applyCoverCursor(element: HTMLElement, imageUrl?: string) {
   cover.style.width = `${CURSOR_WIDTH}px`;
   cover.style.height = `${CURSOR_HEIGHT}px`;
   cover.style.borderRadius = `${CURSOR_BORDER_RADIUS}px`;
-  cover.style.border = "1px solid rgba(0, 0, 0, 0.28)";
+  cover.style.border = "1px solid #235848";
   cover.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.2)";
   cover.style.backgroundImage = `url(${imageUrl})`;
   cover.style.backgroundPosition = "center";
@@ -122,8 +122,8 @@ function applyCursorName(element: HTMLElement, name?: string | null) {
   label.style.lineHeight = "1";
   label.style.borderRadius = "999px";
   label.style.background = "rgba(255, 255, 255, 0.92)";
-  label.style.border = "1px solid rgba(0, 0, 0, 0.2)";
-  label.style.color = "#0f172a";
+  label.style.border = "1px solid #235848";
+  label.style.color = "#235848";
   label.style.whiteSpace = "nowrap";
   label.style.pointerEvents = "none";
 
@@ -281,7 +281,7 @@ export default function Home() {
     cursor.style.height = `${CURSOR_HEIGHT}px`;
     cursor.style.transform = "translate(-200px, -200px)";
     cursor.style.borderRadius = `${CURSOR_BORDER_RADIUS}px`;
-    cursor.style.border = "1px solid rgba(0, 0, 0, 0.28)";
+    cursor.style.border = "1px solid #235848";
     cursor.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.2)";
     cursor.style.backgroundImage = `url(${activeCursorImage})`;
     cursor.style.backgroundPosition = "center";
@@ -302,8 +302,8 @@ export default function Home() {
     nameTag.style.lineHeight = "1";
     nameTag.style.borderRadius = "999px";
     nameTag.style.background = "rgba(255, 255, 255, 0.92)";
-    nameTag.style.border = "1px solid rgba(0, 0, 0, 0.2)";
-    nameTag.style.color = "#0f172a";
+    nameTag.style.border = "1px solid #235848";
+    nameTag.style.color = "#235848";
     nameTag.style.whiteSpace = "nowrap";
     cursor.appendChild(nameTag);
 
@@ -411,20 +411,13 @@ export default function Home() {
   function applyProfile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const normalizedName = nameInput.trim();
-    if (!normalizedName) {
-      setModalError("Please enter your name.");
-      return;
-    }
-
-    if (!selectedBook?.coverUrl) {
-      setModalError("Please choose what you are currently reading.");
-      return;
-    }
+    const normalizedName = nameInput.trim() || "anonymous";
+    const selectedCoverUrl = selectedBook?.coverUrl ?? null;
+    const nextName = selectedCoverUrl ? normalizedName : "anonymous";
 
     setModalError(null);
-    setActiveName(normalizedName);
-    setActiveCursorImage(selectedBook.coverUrl);
+    setActiveName(nextName);
+    setActiveCursorImage(selectedCoverUrl);
 
     const cursorsGlobal = (
       window as Window & {
@@ -432,7 +425,26 @@ export default function Home() {
       }
     ).cursors;
     if (cursorsGlobal) {
-      cursorsGlobal.name = normalizedName;
+      cursorsGlobal.name = nextName;
+    }
+
+    setModalOpen(false);
+  }
+
+  function closeModal() {
+    setModalError(null);
+
+    if (!activeCursorImage) {
+      setActiveName("anonymous");
+
+      const cursorsGlobal = (
+        window as Window & {
+          cursors?: { name?: string };
+        }
+      ).cursors;
+      if (cursorsGlobal) {
+        cursorsGlobal.name = "anonymous";
+      }
     }
 
     setModalOpen(false);
@@ -440,18 +452,21 @@ export default function Home() {
 
   return (
     <main className="relative min-h-screen bg-white">
-      <button
-        type="button"
-        onClick={() => {
-          setModalOpen(true);
-          setModalError(null);
-          setNameInput(activeName);
-          setBookQuery(selectedBook?.title ?? "");
-        }}
-        className="absolute left-3 top-3 z-20 border border-black bg-white px-3 py-1 text-black"
-      >
-        update
-      </button>
+      <div className="absolute left-3 top-3 z-20 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => {
+            setModalOpen(true);
+            setModalError(null);
+            setNameInput(activeName);
+            setBookQuery(selectedBook?.title ?? "");
+          }}
+          className="border border-[#235848] bg-white px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
+        >
+          update
+        </button>
+        <div className="text-lg">welcome to book club</div>
+      </div>
 
       {modalOpen ? (
         <div
@@ -460,15 +475,24 @@ export default function Home() {
         >
           <form
             onSubmit={applyProfile}
-            className="w-full max-w-xl bg-white p-5 text-black"
-            style={{ border: "1px solid black" }}
+            className="relative w-full max-w-xl bg-white p-5"
+            style={{ border: "1px solid #235848" }}
           >
+            <button
+              type="button"
+              onClick={closeModal}
+              className="absolute right-2 top-2 border-0 bg-transparent p-0 text-base leading-none transition-opacity hover:opacity-70"
+              aria-label="close"
+            >
+              x
+            </button>
+
             <div className="text-lg">whats ur name</div>
             <input
               value={nameInput}
               onChange={(event) => setNameInput(event.target.value)}
               placeholder="type your name"
-              className="mt-2 w-full border border-black px-3 py-2"
+              className="mt-2 w-full border border-[#235848] px-3 py-2"
               autoComplete="off"
             />
 
@@ -487,7 +511,7 @@ export default function Home() {
                 }
               }}
               placeholder="search by book title or author"
-              className="mt-2 w-full border border-black px-3 py-2"
+              className="mt-2 w-full border border-[#235848] px-3 py-2"
               autoComplete="off"
               spellCheck={false}
             />
@@ -497,7 +521,7 @@ export default function Home() {
             ) : null}
 
             {bookResults.length > 0 ? (
-              <div className="mt-2 max-h-56 overflow-auto border border-black">
+              <div className="mt-2 max-h-56 overflow-auto border border-[#235848]">
                 {bookResults.map((book) => (
                   <button
                     key={book.id}
@@ -505,7 +529,7 @@ export default function Home() {
                     onClick={() => {
                       void chooseBook(book);
                     }}
-                    className="block w-full border-b border-black px-3 py-2 text-left last:border-b-0 hover:bg-gray-100"
+                    className="block w-full border-b border-[#235848] px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3]"
                   >
                     {book.title} - {book.authors}
                   </button>
@@ -522,20 +546,21 @@ export default function Home() {
                 />
                 <div>
                   <div>{selectedBook.title}</div>
-                  <div className="text-sm text-gray-600">
-                    {selectedBook.authors}
-                  </div>
+                  <div className="text-sm">{selectedBook.authors}</div>
                 </div>
               </div>
             ) : null}
 
             {modalError ? (
-              <div className="mt-3 text-sm text-red-700">{modalError}</div>
+              <div className="mt-3 text-sm">{modalError}</div>
             ) : null}
 
             <div className="mt-5 flex justify-end gap-2">
-              <button type="submit" className="border border-black px-3 py-2">
-                save
+              <button
+                type="submit"
+                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
+              >
+                set
               </button>
             </div>
           </form>
