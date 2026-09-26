@@ -99,6 +99,8 @@ function applyCoverCursor(element: HTMLElement, imageUrl?: string) {
 function applyCursorName(element: HTMLElement, name?: string | null) {
   const defaultLabel = element.querySelector(".playhtml-cursor-name");
   defaultLabel?.remove();
+  const defaultMessage = element.querySelector(".playhtml-cursor-message");
+  defaultMessage?.remove();
 
   const existing = element.querySelector(
     `.${CURSOR_NAME_CLASS}`,
@@ -148,6 +150,28 @@ export default function Home() {
   const remoteCursorElementRef = useRef(new Map<string, HTMLElement>());
   const localCursorElementRef = useRef<HTMLDivElement | null>(null);
   const suppressNextSearchRef = useRef(false);
+
+  useEffect(() => {
+    const styleId = "playhtml-hide-default-cursor-labels";
+    if (document.getElementById(styleId)) {
+      return;
+    }
+
+    const style = document.createElement("style");
+    style.id = styleId;
+    style.textContent = `
+      .playhtml-cursor-other .playhtml-cursor-name,
+      .playhtml-cursor-other .playhtml-cursor-message {
+        display: none !important;
+      }
+    `;
+
+    document.head.appendChild(style);
+
+    return () => {
+      style.remove();
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
