@@ -23,6 +23,17 @@ type BookDetails = {
   slug: string | null;
 };
 
+type UploadedCsvBook = {
+  sourceTitle: string;
+  sourceAuthor: string | null;
+  book: BookDetails | null;
+};
+
+type CsvBookInput = {
+  title: string;
+  author: string | null;
+};
+
 const MIN_QUERY_LENGTH = 2;
 const CURSOR_IMAGE_CHANNEL = "bookCursorImage";
 const COVER_CURSOR_CLASS = "book-cover-cursor";
@@ -132,6 +143,132 @@ function applyCursorName(element: HTMLElement, name?: string | null) {
   }
 }
 
+function parseCsvRows(csvText: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < csvText.length; index += 1) {
+    const char = csvText[index];
+
+    if (char === '"') {
+      const nextChar = csvText[index + 1];
+      if (inQuotes && nextChar === '"') {
+        field += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (!inQuotes && char === ",") {
+      row.push(field.trim());
+      field = "";
+      continue;
+    }
+
+    if (!inQuotes && (char === "\n" || char === "\r")) {
+      if (char === "\r" && csvText[index + 1] === "\n") {
+        index += 1;
+      }
+      row.push(field.trim());
+      field = "";
+
+      if (row.some((value) => value.length > 0)) {
+        rows.push(row);
+      }
+
+      row = [];
+      continue;
+    }
+
+    field += char;
+  }
+
+  row.push(field.trim());
+  if (row.some((value) => value.length > 0)) {
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function normalizeMatchValue(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isLikelyAuthorMatch(candidateAuthors: string, expectedAuthor: string) {
+  const normalizedCandidate = normalizeMatchValue(candidateAuthors);
+  const normalizedExpected = normalizeMatchValue(expectedAuthor);
+
+  if (!normalizedCandidate || !normalizedExpected) {
+    return false;
+  }
+
+  return (
+    normalizedCandidate.includes(normalizedExpected) ||
+    normalizedExpected.includes(normalizedCandidate)
+  );
+}
+
+function getCsvBookInputsFromCsv(csvText: string) {
+  const rows = parseCsvRows(csvText);
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const parsedRows = rows
+    .map((row) => ({
+      title: row[1]?.trim() ?? "",
+      author: row[2]?.trim() ?? "",
+    }))
+    .filter((row) => row.title.length > 0);
+
+  if (parsedRows.length === 0) {
+    return [];
+  }
+
+  const firstRow = parsedRows[0];
+  const firstTitle = firstRow?.title.toLowerCase() ?? "";
+  const firstAuthor = firstRow?.author.toLowerCase() ?? "";
+  const startsWithHeader =
+    firstTitle === "title" ||
+    firstTitle === "book" ||
+    firstTitle === "book title" ||
+    firstAuthor === "author" ||
+    firstAuthor === "authors";
+
+  const dataRows = startsWithHeader ? parsedRows.slice(1) : parsedRows;
+  const uniqueRows = new Map<string, CsvBookInput>();
+
+  dataRows.forEach((row) => {
+    const key = normalizeMatchValue(row.title);
+    if (!key) {
+      return;
+    }
+
+    if (!uniqueRows.has(key)) {
+      uniqueRows.set(key, {
+        title: row.title,
+        author: row.author || null,
+      });
+    }
+  });
+
+  return Array.from(uniqueRows.values());
+}
+
+function getUniqueTitleKey(item: UploadedCsvBook) {
+  const value = item.book?.title ?? item.sourceTitle;
+  return value.trim().toLowerCase();
+}
+
 export default function Home() {
   const [modalOpen, setModalOpen] = useState(true);
   const [nameInput, setNameInput] = useState("");
@@ -144,12 +281,20 @@ export default function Home() {
   );
   const [searchLoading, setSearchLoading] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
+  const [csvBooks, setCsvBooks] = useState<UploadedCsvBook[]>([]);
+  const [csvLoading, setCsvLoading] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [csvFileName, setCsvFileName] = useState<string>("");
+  const [csvSubmittingTitle, setCsvSubmittingTitle] = useState<string | null>(
+    null,
+  );
 
   const playRef = useRef<PlayHTMLComponents | null>(null);
   const remoteCursorIdentityRef = useRef(new Map<string, CursorIdentity>());
   const remoteCursorElementRef = useRef(new Map<string, HTMLElement>());
   const localCursorElementRef = useRef<HTMLDivElement | null>(null);
   const suppressNextSearchRef = useRef(false);
+  const csvInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const styleId = "playhtml-hide-default-cursor-labels";
@@ -352,6 +497,7 @@ export default function Home() {
     const timeout = window.setTimeout(async () => {
       setSearchLoading(true);
       try {
+        console.log("[modal/search] submitting query:", normalized);
         const response = await fetch(
           `/api/search?query=${encodeURIComponent(normalized)}`,
           { signal: controller.signal },
@@ -385,6 +531,7 @@ export default function Home() {
   async function chooseBook(book: BookSuggestion) {
     setModalError(null);
     try {
+      console.log("[modal/book] submitting id:", book.id, "title:", book.title);
       const response = await fetch(`/api/books/${book.id}`);
       if (!response.ok) {
         throw new Error("Unable to load this book right now.");
@@ -450,8 +597,199 @@ export default function Home() {
     setModalOpen(false);
   }
 
+  async function resolveBookFromInput(input: CsvBookInput) {
+    console.log(
+      "[upload/search] submitting title:",
+      input.title,
+      "author:",
+      input.author,
+    );
+    const searchResponse = await fetch(
+      `/api/search?query=${encodeURIComponent(input.title)}`,
+    );
+
+    if (!searchResponse.ok) {
+      return null;
+    }
+
+    const searchPayload = (await searchResponse.json()) as {
+      results?: BookSuggestion[];
+    };
+    const candidates = searchPayload.results ?? [];
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const normalizedTitle = input.title.trim().toLowerCase();
+    const expectedAuthor = input.author?.trim() ?? "";
+    const prioritizedCandidates = [...candidates].sort((left, right) => {
+      const leftAuthorMatch = expectedAuthor
+        ? isLikelyAuthorMatch(left.authors, expectedAuthor)
+        : false;
+      const rightAuthorMatch = expectedAuthor
+        ? isLikelyAuthorMatch(right.authors, expectedAuthor)
+        : false;
+
+      if (leftAuthorMatch !== rightAuthorMatch) {
+        return leftAuthorMatch ? -1 : 1;
+      }
+
+      const leftExact = left.title.trim().toLowerCase() === normalizedTitle;
+      const rightExact = right.title.trim().toLowerCase() === normalizedTitle;
+
+      if (leftExact === rightExact) {
+        return 0;
+      }
+
+      return leftExact ? -1 : 1;
+    });
+
+    let coverAuthorMatch: BookDetails | null = null;
+    let coverFallback: BookDetails | null = null;
+
+    for (const candidate of prioritizedCandidates) {
+      console.log(
+        "[upload/book] submitting candidate id:",
+        candidate.id,
+        "candidate title:",
+        candidate.title,
+        "for source title:",
+        input.title,
+        "source author:",
+        input.author,
+      );
+      const bookResponse = await fetch(`/api/books/${candidate.id}`);
+      if (!bookResponse.ok) {
+        console.log(
+          "[upload/book] candidate failed:",
+          candidate.id,
+          "status:",
+          bookResponse.status,
+        );
+        continue;
+      }
+
+      const bookPayload = (await bookResponse.json()) as {
+        book: BookDetails | null;
+      };
+
+      const resolvedBook = bookPayload.book;
+      if (!resolvedBook) {
+        continue;
+      }
+
+      const authorMatch = expectedAuthor
+        ? isLikelyAuthorMatch(resolvedBook.authors, expectedAuthor)
+        : false;
+
+      if (!resolvedBook.coverUrl) {
+        continue;
+      }
+
+      if (authorMatch || !expectedAuthor) {
+        coverAuthorMatch = resolvedBook;
+        break;
+      }
+
+      if (!coverFallback) {
+        coverFallback = resolvedBook;
+      }
+    }
+
+    return coverAuthorMatch ?? coverFallback;
+  }
+
+  async function handleCsvUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    setCsvFileName(file.name);
+    setCsvError(null);
+    setCsvLoading(true);
+    setCsvSubmittingTitle(null);
+
+    try {
+      const csvText = await file.text();
+      const entries = getCsvBookInputsFromCsv(csvText);
+
+      if (entries.length === 0) {
+        throw new Error("No titles found in the second column.");
+      }
+
+      const nextRows: UploadedCsvBook[] = [];
+
+      for (const entry of entries) {
+        const submittedLabel = entry.author
+          ? `${entry.title} by ${entry.author}`
+          : entry.title;
+
+        setCsvSubmittingTitle(submittedLabel);
+
+        try {
+          const book = await resolveBookFromInput(entry);
+          nextRows.push({
+            sourceTitle: entry.title,
+            sourceAuthor: entry.author,
+            book,
+          });
+        } catch {
+          nextRows.push({
+            sourceTitle: entry.title,
+            sourceAuthor: entry.author,
+            book: null,
+          });
+        }
+      }
+
+      setCsvBooks((current) => {
+        const seen = new Set(current.map((item) => getUniqueTitleKey(item)));
+        const merged = [...current];
+
+        nextRows.forEach((item) => {
+          const key = getUniqueTitleKey(item);
+          if (seen.has(key)) {
+            return;
+          }
+
+          seen.add(key);
+          merged.push(item);
+        });
+
+        return merged;
+      });
+    } catch (error) {
+      setCsvError(
+        error instanceof Error
+          ? error.message
+          : "Could not process this CSV file.",
+      );
+    } finally {
+      setCsvSubmittingTitle(null);
+      setCsvLoading(false);
+      input.value = "";
+    }
+  }
+
+  function clearCsvBooks() {
+    setCsvBooks([]);
+    setCsvError(null);
+    setCsvFileName("");
+    setCsvSubmittingTitle(null);
+  }
+
+  function removeCsvBookByKey(titleKey: string) {
+    setCsvBooks((current) =>
+      current.filter((item) => getUniqueTitleKey(item) !== titleKey),
+    );
+  }
+
   return (
-    <main className="relative min-h-screen bg-white">
+    <main className="relative min-h-screen bg-white pb-44">
       <div className="absolute left-3 top-3 z-20 flex items-center gap-3">
         <button
           type="button"
@@ -465,6 +803,13 @@ export default function Home() {
         >
           update
         </button>
+        <input
+          ref={csvInputRef}
+          type="file"
+          accept="text/csv,.csv"
+          onChange={handleCsvUpload}
+          className="hidden"
+        />
         <div className="text-lg">welcome to book club</div>
       </div>
 
@@ -566,6 +911,94 @@ export default function Home() {
           </form>
         </div>
       ) : null}
+
+      <section
+        className="fixed bottom-0 left-0 right-0 z-10 border-t border-[#235848] bg-white"
+        aria-live="polite"
+      >
+        <div className="px-3 py-2">
+          <div className="flex items-center gap-3 text-sm">
+            <div>books i've read</div>
+            <button
+              type="button"
+              onClick={() => {
+                csvInputRef.current?.click();
+              }}
+              className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+            >
+              upload
+            </button>
+            <button
+              type="button"
+              onClick={clearCsvBooks}
+              className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+            >
+              clear
+            </button>
+            {csvLoading ? <div>loading books...</div> : null}
+            {csvSubmittingTitle ? (
+              <div>{`submitting: ${csvSubmittingTitle}`}</div>
+            ) : null}
+            {csvError ? <div>{csvError}</div> : null}
+          </div>
+
+          <div className="mt-2 overflow-x-auto pb-1">
+            <div className="flex min-w-max gap-2">
+              {csvBooks.map((item) => {
+                const itemKey = getUniqueTitleKey(item);
+
+                return (
+                  <div key={itemKey} className="shrink-0">
+                    {item.book?.coverUrl ? (
+                      <div className="group relative">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            removeCsvBookByKey(itemKey);
+                          }}
+                          className="absolute right-1 top-1 z-10 border-0 bg-transparent p-0 text-sm leading-none opacity-0 transition-opacity hover:opacity-100 group-hover:opacity-100"
+                          aria-label={`remove ${item.book.title}`}
+                        >
+                          x
+                        </button>
+
+                        <img
+                          src={item.book.coverUrl}
+                          alt={`${item.book.title} cover`}
+                          style={{
+                            width: "88px",
+                            height: "132px",
+                            objectFit: "cover",
+                          }}
+                        />
+
+                        <div className="pointer-events-none absolute inset-0 flex flex-col justify-end bg-white/90 p-2 text-xs opacity-0 transition-opacity group-hover:opacity-100">
+                          <div>{item.book.title}</div>
+                          <div>{item.book.authors}</div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="group relative" style={{ width: "88px" }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            removeCsvBookByKey(itemKey);
+                          }}
+                          className="absolute right-1 top-1 border-0 bg-transparent p-0 text-sm leading-none opacity-0 transition-opacity hover:opacity-100 group-hover:opacity-100"
+                          aria-label={`remove ${item.sourceTitle}`}
+                        >
+                          x
+                        </button>
+                        <div className="text-xs">{`${item.sourceTitle} (not found)`}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
   );
 }
