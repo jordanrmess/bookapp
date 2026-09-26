@@ -113,7 +113,7 @@ function applyCursorName(element: HTMLElement, name?: string | null) {
 
   const label = existing ?? document.createElement("div");
   label.className = CURSOR_NAME_CLASS;
-  label.textContent = name;
+  label.textContent = `${name} is reading`;
   label.style.position = "absolute";
   label.style.left = "0";
   label.style.top = `${CURSOR_HEIGHT + 6}px`;
@@ -291,7 +291,9 @@ export default function Home() {
     cursor.style.zIndex = "20";
 
     const nameTag = document.createElement("div");
-    nameTag.textContent = activeName || "reader";
+    nameTag.textContent = activeName
+      ? `${activeName} is reading`
+      : "reader is reading";
     nameTag.style.position = "absolute";
     nameTag.style.left = "0";
     nameTag.style.top = `${CURSOR_HEIGHT + 6}px`;
