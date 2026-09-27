@@ -1555,7 +1555,7 @@ export default function Home() {
 
     return (
       <section
-        className="border-t border-[#235848] bg-white px-3 py-2"
+        className="border-t border-[#235848] bg-[#c8ef65] px-3 py-2"
         onDragOver={(event) => {
           handleShelfDragOver(event, shelf);
         }}
@@ -1715,10 +1715,18 @@ export default function Home() {
 
   return (
     <main
-      className="relative min-h-screen bg-white"
+      className="relative min-h-screen bg-[#c8ef65]"
       style={{ paddingBottom: "360px" }}
     >
-      <div className="absolute left-3 top-3 z-20 flex items-center gap-3">
+      <div className="absolute left-3 right-3 top-3 z-20 flex items-center justify-between gap-3">
+        <input
+          ref={csvInputRef}
+          type="file"
+          accept="text/csv,.csv"
+          onChange={handleCsvUpload}
+          className="hidden"
+        />
+        <div className="text-lg">stacks</div>
         <button
           type="button"
           onClick={() => {
@@ -1727,18 +1735,10 @@ export default function Home() {
             setNameInput(activeName);
             setBookQuery(selectedBook?.title ?? "");
           }}
-          className="border border-[#235848] bg-white px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
+          className="border border-[#235848] bg-[#c8ef65] px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
         >
           set cursor
         </button>
-        <input
-          ref={csvInputRef}
-          type="file"
-          accept="text/csv,.csv"
-          onChange={handleCsvUpload}
-          className="hidden"
-        />
-        <div className="text-lg">welcome to book club</div>
       </div>
 
       {modalOpen ? (
@@ -2030,8 +2030,8 @@ export default function Home() {
         </div>
       ) : null}
 
-      <section className="fixed bottom-0 left-0 right-0 z-10 bg-white">
-        <div className="border-t border-[#235848] bg-white px-3 py-2 text-base">
+      <section className="fixed bottom-0 left-0 right-0 z-10 bg-[#c8ef65]">
+        <div className="border-t border-[#235848] bg-[#c8ef65] px-3 py-2 text-base">
           jordan&apos;s stacks
         </div>
         {renderShelfSection("currentlyReading", "currently reading")}
