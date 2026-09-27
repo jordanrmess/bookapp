@@ -1849,7 +1849,7 @@ export default function Home() {
         </div>
         {renderShelfSection("currentlyReading", "currently reading")}
         {renderShelfSection("wantToRead", "want to read")}
-        {renderShelfSection("booksRead", "books i've read")}
+        {renderShelfSection("booksRead", "read")}
       </section>
     </main>
   );
