@@ -49,6 +49,7 @@ export type BookSuggestion = {
   title: string;
   authors: string;
   slug: string | null;
+  coverUrl: string | null;
 };
 
 export type BookDetails = {
@@ -62,6 +63,49 @@ export type BookDetails = {
   rating: number | null;
   slug: string | null;
 };
+
+async function getCoverUrlsByBookIds(ids: string[]) {
+  const numericIds = ids
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id));
+
+  if (numericIds.length === 0) {
+    return new Map<string, string | null>();
+  }
+
+  const data = await hardcoverRequest<{
+    books?: Array<{
+      id?: number | string;
+      image?: {
+        url?: string | null;
+      } | null;
+    }>;
+  }>(
+    `
+      query BooksByIds($ids: [Int!]) {
+        books(where: { id: { _in: $ids } }) {
+          id
+          image {
+            url
+          }
+        }
+      }
+    `,
+    { ids: numericIds },
+  );
+
+  const map = new Map<string, string | null>();
+
+  for (const book of data.books ?? []) {
+    if (!book?.id) {
+      continue;
+    }
+
+    map.set(String(book.id), book.image?.url ?? null);
+  }
+
+  return map;
+}
 
 function getToken() {
   const token = process.env.HARDCOVER_API_KEY;
@@ -221,14 +265,24 @@ export async function searchBooks(query: string) {
 
   const rows = normalizeSearchRows(data.search?.results ?? data.search);
 
-  return rows
+  const normalizedRows = rows
     .map((row) => ({
       id: String(row.id ?? ""),
       title: row.title?.trim() ?? "Untitled book",
       authors: formatAuthors(row.author_names),
       slug: row.slug ?? null,
+      coverUrl: null,
     }))
     .filter((row) => row.id.length > 0);
+
+  const coverUrlsById = await getCoverUrlsByBookIds(
+    normalizedRows.map((row) => row.id),
+  );
+
+  return normalizedRows.map((row) => ({
+    ...row,
+    coverUrl: coverUrlsById.get(row.id) ?? null,
+  }));
 }
 
 export async function getBookById(id: string) {

@@ -14,6 +14,7 @@ type BookSuggestion = {
   title: string;
   authors: string;
   slug: string | null;
+  coverUrl: string | null;
 };
 
 type BookDetails = {
@@ -1639,9 +1640,20 @@ export default function Home() {
                     onClick={() => {
                       void chooseBook(book);
                     }}
-                    className="block w-full border-b border-[#235848] px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3]"
+                    className="flex w-full items-center border-b border-[#235848] px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3]"
                   >
-                    {book.title} - {book.authors}
+                    <div className="mr-3 h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                      {book.coverUrl ? (
+                        <img
+                          src={book.coverUrl}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
+                      ) : null}
+                    </div>
+                    <div>
+                      {book.title} - {book.authors}
+                    </div>
                   </button>
                 ))}
               </div>
@@ -1732,11 +1744,22 @@ export default function Home() {
                         void addBookFromSearch(book);
                       }}
                       disabled={isAdding}
-                      className="block w-full border-b border-[#235848] px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
+                      className="flex w-full items-center border-b border-[#235848] px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
                     >
-                      {isAdding
-                        ? `adding ${book.title}...`
-                        : `${book.title} - ${book.authors}`}
+                      <div className="mr-3 h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                        {book.coverUrl ? (
+                          <img
+                            src={book.coverUrl}
+                            alt=""
+                            className="h-full w-full object-cover"
+                          />
+                        ) : null}
+                      </div>
+                      <div>
+                        {isAdding
+                          ? `adding ${book.title}...`
+                          : `${book.title} - ${book.authors}`}
+                      </div>
                     </button>
                   );
                 })}
