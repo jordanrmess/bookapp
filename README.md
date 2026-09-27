@@ -26,6 +26,23 @@ HARDCOVER_API_KEY=your_token_here
 
 You can copy the provided `.env.local.example` file as a starting point.
 
+## Supabase shelf persistence
+
+This app supports saving the two bookshelf collections (want to read and books i've read) to Supabase while keeping cursor/profile state and PlayHTML presence separate from the shelf database logic.
+
+Create `.env.local` entries like:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-if-needed-for-server-side-writes
+SHELF_EDIT_PASSWORD=choose_a_password_for_shelf_edits
+```
+
+The repo also includes a SQL schema at `supabase/schema.sql` for the `shelves` and `books` tables. In prototype mode, the app uses a browser-local anonymous identifier so unauthenticated users still keep their shelf data without needing app auth.
+
+`SHELF_EDIT_PASSWORD` is used by `/api/shelves/verify` so shelf changes (add/upload/remove/clear) require a quick password check modal before mutating either shelf.
+
 ## What the app does
 
 Type a book title, choose a match from the dropdown, and the selected book's cover will render on the right. The browser talks to local API routes only; those routes forward requests to Hardcover with your token.

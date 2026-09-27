@@ -1,0 +1,58 @@
+import { createClient } from "@supabase/supabase-js";
+
+export type ShelfName = "wantToRead" | "currentlyReading" | "booksRead";
+
+const ANONYMOUS_SHELF_KEY = "booksrus-anonymous-shelf-key";
+let supabaseClient: ReturnType<typeof createClient> | null = null;
+
+export function getSupabaseUrl() {
+  return process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+}
+
+export function getSupabaseAnonKey() {
+  return process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
+}
+
+export function getSupabaseServiceRoleKey() {
+  return process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+}
+
+export function getSupabaseClient() {
+  const url = getSupabaseUrl();
+  const anonKey = getSupabaseAnonKey();
+
+  if (!url || !anonKey) {
+    return null;
+  }
+
+  if (!supabaseClient) {
+    supabaseClient = createClient(url, anonKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+    });
+  }
+
+  return supabaseClient;
+}
+
+export function getAnonymousShelfKey() {
+  if (typeof window === "undefined") {
+    return "demo-local-user";
+  }
+
+  const stored = window.localStorage.getItem(ANONYMOUS_SHELF_KEY);
+  if (stored && stored.trim().length > 0) {
+    return stored;
+  }
+
+  const value =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `demo-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  window.localStorage.setItem(ANONYMOUS_SHELF_KEY, value);
+  return value;
+}
