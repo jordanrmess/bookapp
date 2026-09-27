@@ -3,6 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 export type ShelfName = "wantToRead" | "currentlyReading" | "booksRead";
 
 const ANONYMOUS_SHELF_KEY = "booksrus-anonymous-shelf-key";
+const CONFIGURED_ANONYMOUS_SHELF_KEY =
+  process.env.NEXT_PUBLIC_SHELF_ANON_KEY?.trim() ?? "";
 let supabaseClient: ReturnType<typeof createClient> | null = null;
 let hasWarnedAboutMissingConfig = false;
 
@@ -52,6 +54,17 @@ export function getSupabaseClient() {
 }
 
 export function getAnonymousShelfKey() {
+  if (CONFIGURED_ANONYMOUS_SHELF_KEY.length > 0) {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(
+        ANONYMOUS_SHELF_KEY,
+        CONFIGURED_ANONYMOUS_SHELF_KEY,
+      );
+    }
+
+    return CONFIGURED_ANONYMOUS_SHELF_KEY;
+  }
+
   if (typeof window === "undefined") {
     return "demo-local-user";
   }

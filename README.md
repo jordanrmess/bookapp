@@ -35,16 +35,19 @@ Create `.env.local` entries like:
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+NEXT_PUBLIC_SHELF_ANON_KEY=optional_fixed_key_for_shared_shelf_identity
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-if-needed-for-server-side-writes
 SHELF_EDIT_PASSWORD=choose_a_password_for_shelf_edits
 ```
 
 The repo also includes a SQL schema at `supabase/schema.sql` for the `shelves` and `books` tables. In prototype mode, the app uses a browser-local anonymous identifier so unauthenticated users still keep their shelf data without needing app auth.
 
+To keep shelf data stable across Vercel branches/domains/devices, set `NEXT_PUBLIC_SHELF_ANON_KEY` to a fixed value in each environment. If this is omitted, each browser generates its own local key and may read/write a different shelf identity.
+
 `SHELF_EDIT_PASSWORD` is used by `/api/shelves/verify` so shelf changes (add/upload/remove/clear) require a quick password check modal before mutating either shelf.
 
-The schema enables Row Level Security and defines explicit policies so Supabase security warnings are resolved. These policies are intentionally permissive for prototype mode because shelf writes happen directly from the browser with anon keys.
-For production-grade isolation, move shelf reads/writes to server routes and apply user-scoped RLS policies.
+The current schema disables Row Level Security for prototype mode and removes policies so browser anon-key writes can read/write directly.
+For production-grade isolation, move shelf reads/writes to server routes and re-enable user-scoped RLS policies.
 
 If you created the `shelves` table before this schema, you may have an older `shelf_name` check constraint that rejects camelCase values like `currentlyReading`.
 Run `supabase/schema.sql` again (or at least the `alter table ... shelves_shelf_name_check` block) in Supabase SQL editor to align existing environments.
