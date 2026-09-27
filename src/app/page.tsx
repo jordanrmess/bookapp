@@ -50,6 +50,11 @@ type ShelfState = {
   submittingTitle: string | null;
 };
 
+type DraggedShelfBook = {
+  sourceShelf: ShelfKey;
+  titleKey: string;
+};
+
 function getBookDetailsFromRow(
   row: Record<string, unknown>,
 ): BookDetails | null {
@@ -114,6 +119,7 @@ const CURSOR_NAME_CLASS = "book-cursor-name";
 const CURSOR_WIDTH = 102;
 const CURSOR_HEIGHT = 144;
 const CURSOR_BORDER_RADIUS = 9;
+const SHELF_BOOK_DRAG_MIME = "application/x-booksrus-shelf-book";
 
 type CursorIdentity = {
   imageUrl: string | null;
@@ -645,6 +651,9 @@ export default function Home() {
   const [editAuthError, setEditAuthError] = useState<string | null>(null);
   const [editAuthLoading, setEditAuthLoading] = useState(false);
   const [shelvesLoaded, setShelvesLoaded] = useState(false);
+  const [draggedShelfBook, setDraggedShelfBook] =
+    useState<DraggedShelfBook | null>(null);
+  const [activeDropShelf, setActiveDropShelf] = useState<ShelfKey | null>(null);
   const lastPersistedShelfSnapshotRef = useRef<string | null>(null);
   const pendingShelfMutationRef = useRef<(() => void | Promise<void>) | null>(
     null,
@@ -1346,6 +1355,116 @@ export default function Home() {
     }));
   }
 
+  function moveShelfBook(
+    sourceShelf: ShelfKey,
+    targetShelf: ShelfKey,
+    titleKey: string,
+  ) {
+    if (sourceShelf === targetShelf) {
+      return;
+    }
+
+    setShelves((current) => {
+      const sourceBooks = current[sourceShelf].books;
+      const targetBooks = current[targetShelf].books;
+      const movedBook = sourceBooks.find(
+        (item) => getUniqueTitleKey(item) === titleKey,
+      );
+
+      if (!movedBook) {
+        return current;
+      }
+
+      const nextSourceBooks = sourceBooks.filter(
+        (item) => getUniqueTitleKey(item) !== titleKey,
+      );
+      const alreadyInTarget = targetBooks.some(
+        (item) => getUniqueTitleKey(item) === titleKey,
+      );
+      const nextTargetBooks = alreadyInTarget
+        ? targetBooks
+        : [...targetBooks, movedBook];
+
+      return {
+        ...current,
+        [sourceShelf]: {
+          ...current[sourceShelf],
+          books: nextSourceBooks,
+        },
+        [targetShelf]: {
+          ...current[targetShelf],
+          books: nextTargetBooks,
+        },
+      };
+    });
+  }
+
+  function getDraggedShelfBook(event: React.DragEvent<HTMLElement>) {
+    const dragPayload = event.dataTransfer.getData(SHELF_BOOK_DRAG_MIME);
+
+    if (dragPayload) {
+      try {
+        const parsed = JSON.parse(dragPayload) as DraggedShelfBook;
+        if (
+          parsed &&
+          typeof parsed.sourceShelf === "string" &&
+          typeof parsed.titleKey === "string"
+        ) {
+          return parsed;
+        }
+      } catch {
+        // Ignore malformed drag data and fall back to local drag state.
+      }
+    }
+
+    return draggedShelfBook;
+  }
+
+  function handleShelfDragOver(
+    event: React.DragEvent<HTMLElement>,
+    targetShelf: ShelfKey,
+  ) {
+    const payload = getDraggedShelfBook(event);
+    if (!payload || payload.sourceShelf === targetShelf) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+
+    if (activeDropShelf !== targetShelf) {
+      setActiveDropShelf(targetShelf);
+    }
+  }
+
+  function handleShelfDrop(
+    event: React.DragEvent<HTMLElement>,
+    targetShelf: ShelfKey,
+  ) {
+    event.preventDefault();
+    setActiveDropShelf(null);
+
+    const payload = getDraggedShelfBook(event);
+    if (!payload || payload.sourceShelf === targetShelf) {
+      return;
+    }
+
+    requestShelfEditAuth(() => {
+      moveShelfBook(payload.sourceShelf, targetShelf, payload.titleKey);
+    });
+  }
+
+  function handleShelfDropZoneLeave(event: React.DragEvent<HTMLElement>) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setActiveDropShelf(null);
+    }
+  }
+
+  function handleShelfDragEnd() {
+    setDraggedShelfBook(null);
+    setActiveDropShelf(null);
+  }
+
   function removeShelfBookByKey(shelf: ShelfKey, titleKey: string) {
     setShelves((current) => ({
       ...current,
@@ -1432,9 +1551,23 @@ export default function Home() {
   function renderShelfSection(shelf: ShelfKey, title: string) {
     const shelfState = shelves[shelf];
     const isCollapsed = collapsedShelves[shelf];
+    const isDropTarget = activeDropShelf === shelf;
 
     return (
-      <section className="border-t border-[#235848] bg-white px-3 py-2">
+      <section
+        className="border-t border-[#235848] bg-white px-3 py-2"
+        onDragOver={(event) => {
+          handleShelfDragOver(event, shelf);
+        }}
+        onDragLeave={handleShelfDropZoneLeave}
+        onDrop={(event) => {
+          handleShelfDrop(event, shelf);
+        }}
+        style={{
+          backgroundColor: isDropTarget ? "#eaf3dc" : undefined,
+          transition: "background-color 140ms ease",
+        }}
+      >
         <div className="flex items-center gap-3 text-sm">
           <button
             type="button"
@@ -1491,9 +1624,38 @@ export default function Home() {
             <div className="flex min-w-max gap-2">
               {shelfState.books.map((item) => {
                 const itemKey = getUniqueTitleKey(item);
+                const isDragged =
+                  draggedShelfBook?.sourceShelf === shelf &&
+                  draggedShelfBook.titleKey === itemKey;
 
                 return (
-                  <div key={itemKey} className="shrink-0">
+                  <div
+                    key={itemKey}
+                    className="shrink-0"
+                    draggable
+                    onDragStart={(event) => {
+                      const payload: DraggedShelfBook = {
+                        sourceShelf: shelf,
+                        titleKey: itemKey,
+                      };
+
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData(
+                        SHELF_BOOK_DRAG_MIME,
+                        JSON.stringify(payload),
+                      );
+                      event.dataTransfer.setData(
+                        "text/plain",
+                        item.sourceTitle,
+                      );
+                      setDraggedShelfBook(payload);
+                    }}
+                    onDragEnd={handleShelfDragEnd}
+                    style={{
+                      opacity: isDragged ? 0.45 : 1,
+                      cursor: "grab",
+                    }}
+                  >
                     {item.book?.coverUrl ? (
                       <div className="group relative">
                         <button
