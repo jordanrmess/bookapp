@@ -442,10 +442,13 @@ function serializeShelfState(shelves: Record<ShelfKey, ShelfState>) {
 async function loadShelfState() {
   const client = getSupabaseClient();
   if (!client) {
+    console.log("SUPABASE READ: client unavailable (missing config)");
     return null;
   }
 
   const anonymousKey = getAnonymousShelfKey();
+  console.log("SUPABASE READ: start", { anonymousKey });
+
   const supabaseTables = client as unknown as {
     from: (table: "shelves" | "books") => SupabaseTableClient;
   };
@@ -463,6 +466,10 @@ async function loadShelfState() {
   console.log("SUPABASE READ:", { data, error });
 
   if (shelfError) {
+    console.log("SUPABASE READ: shelf query failed", {
+      anonymousKey,
+      error: shelfError,
+    });
     throw shelfError;
   }
 
@@ -476,6 +483,12 @@ async function loadShelfState() {
       shelfMap.set(shelfName, shelfId);
     }
   }
+
+  console.log("SUPABASE READ: shelves mapped", {
+    anonymousKey,
+    shelfCount: shelfMap.size,
+    shelfIds: Array.from(shelfMap.values()),
+  });
 
   const nextShelves: Record<ShelfKey, ShelfState> = {
     wantToRead: createShelfState(),
@@ -492,6 +505,13 @@ async function loadShelfState() {
     >;
 
     const { data: bookRows, error: bookError } = bookResponse;
+
+    console.log("SUPABASE READ: books query", {
+      anonymousKey,
+      shelfIds: Array.from(shelfMap.values()),
+      bookRowCount: bookRows?.length ?? 0,
+      error: bookError,
+    });
 
     if (bookError) {
       throw bookError;
@@ -522,16 +542,31 @@ async function loadShelfState() {
     }
   }
 
+  console.log("SUPABASE READ: completed", {
+    anonymousKey,
+    wantToRead: nextShelves.wantToRead.books.length,
+    currentlyReading: nextShelves.currentlyReading.books.length,
+    booksRead: nextShelves.booksRead.books.length,
+  });
+
   return nextShelves;
 }
 
 async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
   const client = getSupabaseClient();
   if (!client) {
+    console.log("SUPABASE WRITE: client unavailable (missing config)");
     return;
   }
 
   const anonymousKey = getAnonymousShelfKey();
+  console.log("SUPABASE WRITE: start", {
+    anonymousKey,
+    wantToRead: nextShelves.wantToRead.books.length,
+    currentlyReading: nextShelves.currentlyReading.books.length,
+    booksRead: nextShelves.booksRead.books.length,
+  });
+
   const supabaseTables = client as unknown as {
     from: (table: "shelves" | "books") => SupabaseTableClient;
   };
@@ -558,6 +593,13 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
 
     const { data: shelfRow, error: shelfError } = shelfResponse;
 
+    console.log("SUPABASE WRITE: shelf upsert", {
+      anonymousKey,
+      shelfName,
+      shelfId: shelfRow?.id ?? null,
+      error: shelfError,
+    });
+
     if (shelfError) {
       throw shelfError;
     }
@@ -572,6 +614,13 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
       .eq("shelf_id", shelfRow.id)) as {
       error: { message: string } | null;
     };
+
+    console.log("SUPABASE WRITE: books delete", {
+      anonymousKey,
+      shelfName,
+      shelfId: shelfRow.id,
+      error: deleteError,
+    });
 
     if (deleteError) {
       throw deleteError;
@@ -601,10 +650,20 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
       .from("books")
       .insert(bookRows)) as SupabaseQueryResult<null>;
 
+    console.log("SUPABASE WRITE: books insert", {
+      anonymousKey,
+      shelfName,
+      shelfId: shelfRow.id,
+      rowCount: bookRows.length,
+      error: insertError,
+    });
+
     if (insertError) {
       throw insertError;
     }
   }
+
+  console.log("SUPABASE WRITE: completed", { anonymousKey });
 }
 
 export default function Home() {
