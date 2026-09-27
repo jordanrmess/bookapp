@@ -490,6 +490,35 @@ async function loadShelfState() {
     shelfIds: Array.from(shelfMap.values()),
   });
 
+  if ((shelfRows?.length ?? 0) === 0) {
+    const debugShelfScan = (await client
+      .from("shelves")
+      .select("anonymous_key, shelf_name, created_at")
+      .limit(20)) as {
+      data: Array<Record<string, unknown>> | null;
+      error: { message: string } | null;
+    };
+
+    const debugRows = debugShelfScan.data ?? [];
+    const uniqueAnonymousKeys = Array.from(
+      new Set(
+        debugRows
+          .map((row) =>
+            typeof row.anonymous_key === "string" ? row.anonymous_key : null,
+          )
+          .filter((value): value is string => value !== null),
+      ),
+    );
+
+    console.log("SUPABASE READ: empty result debug", {
+      requestedAnonymousKey: anonymousKey,
+      totalRowsScanned: debugRows.length,
+      uniqueAnonymousKeys,
+      rows: debugRows,
+      error: debugShelfScan.error,
+    });
+  }
+
   const nextShelves: Record<ShelfKey, ShelfState> = {
     wantToRead: createShelfState(),
     currentlyReading: createShelfState(),
