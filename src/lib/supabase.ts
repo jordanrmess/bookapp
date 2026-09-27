@@ -4,6 +4,7 @@ export type ShelfName = "wantToRead" | "currentlyReading" | "booksRead";
 
 const ANONYMOUS_SHELF_KEY = "booksrus-anonymous-shelf-key";
 let supabaseClient: ReturnType<typeof createClient> | null = null;
+let hasWarnedAboutMissingConfig = false;
 
 export function getSupabaseUrl() {
   return process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
@@ -22,6 +23,18 @@ export function getSupabaseClient() {
   const anonKey = getSupabaseAnonKey();
 
   if (!url || !anonKey) {
+    if (!hasWarnedAboutMissingConfig && typeof window !== "undefined") {
+      const missingVars = [
+        !url ? "NEXT_PUBLIC_SUPABASE_URL" : null,
+        !anonKey ? "NEXT_PUBLIC_SUPABASE_ANON_KEY" : null,
+      ].filter((value): value is string => value !== null);
+
+      console.warn(
+        `[supabase] Missing public env vars: ${missingVars.join(", ")}. Shelf data sync is disabled.`,
+      );
+      hasWarnedAboutMissingConfig = true;
+    }
+
     return null;
   }
 

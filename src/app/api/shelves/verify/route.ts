@@ -7,6 +7,23 @@ type VerifyBody = {
   password?: string;
 };
 
+const SHELF_PASSWORD_ENV_KEYS = [
+  "SHELF_EDIT_PASSWORD",
+  "SHELF_PASSWORD",
+  "SHELVES_PASSWORD",
+] as const;
+
+function getConfiguredPassword() {
+  for (const key of SHELF_PASSWORD_ENV_KEYS) {
+    const value = process.env[key]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
 function isPasswordMatch(provided: string, expected: string) {
   const providedBuffer = Buffer.from(provided);
   const expectedBuffer = Buffer.from(expected);
@@ -19,11 +36,14 @@ function isPasswordMatch(provided: string, expected: string) {
 }
 
 export async function POST(request: Request) {
-  const configuredPassword = process.env.SHELF_EDIT_PASSWORD?.trim();
+  const configuredPassword = getConfiguredPassword();
 
   if (!configuredPassword) {
     return NextResponse.json(
-      { error: "Shelf password is not configured on the server." },
+      {
+        error:
+          "Shelf password is not configured on the server. Set SHELF_EDIT_PASSWORD and restart the server.",
+      },
       { status: 500 },
     );
   }
