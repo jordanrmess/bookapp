@@ -1845,7 +1845,7 @@ export default function Home() {
 
       <section className="fixed bottom-0 left-0 right-0 z-10 bg-white">
         <div className="border-t border-[#235848] bg-white px-3 py-2 text-base">
-          stacks
+          jordan&apos;s stacks
         </div>
         {renderShelfSection("currentlyReading", "currently reading")}
         {renderShelfSection("wantToRead", "want to read")}
