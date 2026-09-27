@@ -458,6 +458,9 @@ async function loadShelfState() {
   >;
 
   const { data: shelfRows, error: shelfError } = response;
+  const data = shelfRows;
+  const error = shelfError;
+  console.log("SUPABASE READ:", { data, error });
 
   if (shelfError) {
     throw shelfError;
