@@ -442,12 +442,10 @@ function serializeShelfState(shelves: Record<ShelfKey, ShelfState>) {
 async function loadShelfState() {
   const client = getSupabaseClient();
   if (!client) {
-    console.log("SUPABASE READ: client unavailable (missing config)");
     return null;
   }
 
   const anonymousKey = getAnonymousShelfKey();
-  console.log("SUPABASE READ: start", { anonymousKey });
 
   const supabaseTables = client as unknown as {
     from: (table: "shelves" | "books") => SupabaseTableClient;
@@ -461,15 +459,8 @@ async function loadShelfState() {
   >;
 
   const { data: shelfRows, error: shelfError } = response;
-  const data = shelfRows;
-  const error = shelfError;
-  console.log("SUPABASE READ:", { data, error });
 
   if (shelfError) {
-    console.log("SUPABASE READ: shelf query failed", {
-      anonymousKey,
-      error: shelfError,
-    });
     throw shelfError;
   }
 
@@ -482,41 +473,6 @@ async function loadShelfState() {
     if (shelfName && shelfId) {
       shelfMap.set(shelfName, shelfId);
     }
-  }
-
-  console.log("SUPABASE READ: shelves mapped", {
-    anonymousKey,
-    shelfCount: shelfMap.size,
-    shelfIds: Array.from(shelfMap.values()),
-  });
-
-  if ((shelfRows?.length ?? 0) === 0) {
-    const debugShelfScan = (await client
-      .from("shelves")
-      .select("anonymous_key, shelf_name, created_at")
-      .limit(20)) as {
-      data: Array<Record<string, unknown>> | null;
-      error: { message: string } | null;
-    };
-
-    const debugRows = debugShelfScan.data ?? [];
-    const uniqueAnonymousKeys = Array.from(
-      new Set(
-        debugRows
-          .map((row) =>
-            typeof row.anonymous_key === "string" ? row.anonymous_key : null,
-          )
-          .filter((value): value is string => value !== null),
-      ),
-    );
-
-    console.log("SUPABASE READ: empty result debug", {
-      requestedAnonymousKey: anonymousKey,
-      totalRowsScanned: debugRows.length,
-      uniqueAnonymousKeys,
-      rows: debugRows,
-      error: debugShelfScan.error,
-    });
   }
 
   const nextShelves: Record<ShelfKey, ShelfState> = {
@@ -534,13 +490,6 @@ async function loadShelfState() {
     >;
 
     const { data: bookRows, error: bookError } = bookResponse;
-
-    console.log("SUPABASE READ: books query", {
-      anonymousKey,
-      shelfIds: Array.from(shelfMap.values()),
-      bookRowCount: bookRows?.length ?? 0,
-      error: bookError,
-    });
 
     if (bookError) {
       throw bookError;
@@ -571,30 +520,16 @@ async function loadShelfState() {
     }
   }
 
-  console.log("SUPABASE READ: completed", {
-    anonymousKey,
-    wantToRead: nextShelves.wantToRead.books.length,
-    currentlyReading: nextShelves.currentlyReading.books.length,
-    booksRead: nextShelves.booksRead.books.length,
-  });
-
   return nextShelves;
 }
 
 async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
   const client = getSupabaseClient();
   if (!client) {
-    console.log("SUPABASE WRITE: client unavailable (missing config)");
     return;
   }
 
   const anonymousKey = getAnonymousShelfKey();
-  console.log("SUPABASE WRITE: start", {
-    anonymousKey,
-    wantToRead: nextShelves.wantToRead.books.length,
-    currentlyReading: nextShelves.currentlyReading.books.length,
-    booksRead: nextShelves.booksRead.books.length,
-  });
 
   const supabaseTables = client as unknown as {
     from: (table: "shelves" | "books") => SupabaseTableClient;
@@ -622,13 +557,6 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
 
     const { data: shelfRow, error: shelfError } = shelfResponse;
 
-    console.log("SUPABASE WRITE: shelf upsert", {
-      anonymousKey,
-      shelfName,
-      shelfId: shelfRow?.id ?? null,
-      error: shelfError,
-    });
-
     if (shelfError) {
       throw shelfError;
     }
@@ -643,13 +571,6 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
       .eq("shelf_id", shelfRow.id)) as {
       error: { message: string } | null;
     };
-
-    console.log("SUPABASE WRITE: books delete", {
-      anonymousKey,
-      shelfName,
-      shelfId: shelfRow.id,
-      error: deleteError,
-    });
 
     if (deleteError) {
       throw deleteError;
@@ -679,20 +600,10 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
       .from("books")
       .insert(bookRows)) as SupabaseQueryResult<null>;
 
-    console.log("SUPABASE WRITE: books insert", {
-      anonymousKey,
-      shelfName,
-      shelfId: shelfRow.id,
-      rowCount: bookRows.length,
-      error: insertError,
-    });
-
     if (insertError) {
       throw insertError;
     }
   }
-
-  console.log("SUPABASE WRITE: completed", { anonymousKey });
 }
 
 export default function Home() {
