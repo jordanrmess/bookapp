@@ -116,8 +116,8 @@ const MIN_QUERY_LENGTH = 2;
 const CURSOR_IMAGE_CHANNEL = "bookCursorImage";
 const COVER_CURSOR_CLASS = "book-cover-cursor";
 const CURSOR_NAME_CLASS = "book-cursor-name";
-const CURSOR_WIDTH = 102;
-const CURSOR_HEIGHT = 144;
+const CURSOR_WIDTH = 51;
+const CURSOR_HEIGHT = 72;
 const CURSOR_BORDER_RADIUS = 9;
 const SHELF_BOOK_DRAG_MIME = "application/x-booksrus-shelf-book";
 
