@@ -40,6 +40,28 @@ type CsvBookInput = {
   author: string | null;
 };
 
+type UploadMatchRow = {
+  id: string;
+  sourceTitle: string;
+  sourceAuthor: string | null;
+  candidates: BookSuggestion[];
+  recommendedTitles: BookSuggestion[];
+  selectedCandidateId: string | null;
+};
+
+type UploadRowSearchState = {
+  open: boolean;
+  query: string;
+  loading: boolean;
+  results: BookSuggestion[];
+  error: string | null;
+};
+
+type UploadRowImportState = {
+  status: "importing" | "success" | "error";
+  message: string;
+};
+
 type ShelfKey = "wantToRead" | "currentlyReading" | "booksRead";
 const SHELF_ORDER: ShelfKey[] = ["currentlyReading", "wantToRead", "booksRead"];
 
@@ -113,6 +135,8 @@ function mapDbRowToUploadedBook(row: Record<string, unknown>): UploadedCsvBook {
 }
 
 const MIN_QUERY_LENGTH = 2;
+const UPLOAD_SEARCH_MAX_ATTEMPTS = 3;
+const UPLOAD_SEARCH_RETRY_DELAY_MS = 220;
 const CURSOR_IMAGE_CHANNEL = "bookCursorImage";
 const COVER_CURSOR_CLASS = "book-cover-cursor";
 const CURSOR_NAME_CLASS = "book-cursor-name";
@@ -296,6 +320,74 @@ function isLikelyAuthorMatch(candidateAuthors: string, expectedAuthor: string) {
   );
 }
 
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
+async function fetchSearchResultsWithRetry(
+  query: string,
+  source: "automatic_match" | "manual_row_search",
+) {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= UPLOAD_SEARCH_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(
+        `/api/search?query=${encodeURIComponent(query)}`,
+      );
+
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        console.warn("[Upload Search] Search request attempt failed", {
+          source,
+          query,
+          attempt,
+          maxAttempts: UPLOAD_SEARCH_MAX_ATTEMPTS,
+          httpStatus: response.status,
+        });
+      } else {
+        const payload = (await response.json()) as {
+          results?: BookSuggestion[];
+        };
+
+        if (attempt > 1) {
+          console.log("[Upload Search] Search request succeeded after retry", {
+            source,
+            query,
+            attempt,
+            maxAttempts: UPLOAD_SEARCH_MAX_ATTEMPTS,
+          });
+        }
+
+        return {
+          results: payload.results ?? [],
+          attempt,
+        };
+      }
+    } catch (error) {
+      lastError =
+        error instanceof Error ? error : new Error("Unknown search error");
+      console.warn("[Upload Search] Search request attempt threw error", {
+        source,
+        query,
+        attempt,
+        maxAttempts: UPLOAD_SEARCH_MAX_ATTEMPTS,
+        error: lastError.message,
+      });
+    }
+
+    if (attempt < UPLOAD_SEARCH_MAX_ATTEMPTS) {
+      await wait(UPLOAD_SEARCH_RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  throw (
+    lastError ?? new Error("Search request failed after all retry attempts.")
+  );
+}
+
 function getCsvBookInputsFromCsv(csvText: string) {
   const rows = parseCsvRows(csvText);
   if (rows.length === 0) {
@@ -336,6 +428,69 @@ function getCsvBookInputsFromCsv(csvText: string) {
       uniqueRows.set(key, {
         title: row.title,
         author: row.author || null,
+      });
+    }
+  });
+
+  return Array.from(uniqueRows.values());
+}
+
+function getBookInputsFromPastedList(rawText: string) {
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const parsedRows = lines.map((line) => {
+    if (line.includes("\t")) {
+      const [title, author] = line
+        .split("\t")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0);
+      return { title: title ?? "", author: author ?? "" };
+    }
+
+    if (line.includes(" | ")) {
+      const [title, author] = line.split(" | ").map((part) => part.trim());
+      return { title: title ?? "", author: author ?? "" };
+    }
+
+    if (line.includes(",")) {
+      const [title, author] = line.split(",").map((part) => part.trim());
+      return { title: title ?? "", author: author ?? "" };
+    }
+
+    return { title: line, author: "" };
+  });
+
+  const firstRow = parsedRows[0];
+  const firstTitle = firstRow?.title.toLowerCase() ?? "";
+  const firstAuthor = firstRow?.author.toLowerCase() ?? "";
+  const startsWithHeader =
+    firstTitle === "title" ||
+    firstTitle === "book" ||
+    firstTitle === "book title" ||
+    firstAuthor === "author" ||
+    firstAuthor === "authors";
+
+  const dataRows = startsWithHeader ? parsedRows.slice(1) : parsedRows;
+  const uniqueRows = new Map<string, CsvBookInput>();
+
+  dataRows.forEach((row) => {
+    const title = row.title.trim();
+    const key = normalizeMatchValue(title);
+    if (!key) {
+      return;
+    }
+
+    if (!uniqueRows.has(key)) {
+      uniqueRows.set(key, {
+        title,
+        author: row.author.trim() || null,
       });
     }
   });
@@ -636,9 +791,6 @@ export default function Home() {
   const [addSearchLoading, setAddSearchLoading] = useState(false);
   const [addModalError, setAddModalError] = useState<string | null>(null);
   const [addingBookId, setAddingBookId] = useState<string | null>(null);
-  const [clearConfirmShelf, setClearConfirmShelf] = useState<ShelfKey | null>(
-    null,
-  );
   const [collapsedShelves, setCollapsedShelves] = useState<
     Record<ShelfKey, boolean>
   >({
@@ -654,6 +806,22 @@ export default function Home() {
   const [draggedShelfBook, setDraggedShelfBook] =
     useState<DraggedShelfBook | null>(null);
   const [activeDropShelf, setActiveDropShelf] = useState<ShelfKey | null>(null);
+  const [uploadMatchShelf, setUploadMatchShelf] = useState<ShelfKey | null>(
+    null,
+  );
+  const [uploadMatchRows, setUploadMatchRows] = useState<UploadMatchRow[]>([]);
+  const [uploadMatchError, setUploadMatchError] = useState<string | null>(null);
+  const [uploadImporting, setUploadImporting] = useState(false);
+  const [uploadDuplicateCount, setUploadDuplicateCount] = useState(0);
+  const [uploadRowSearchState, setUploadRowSearchState] = useState<
+    Record<string, UploadRowSearchState>
+  >({});
+  const [uploadRowImportState, setUploadRowImportState] = useState<
+    Record<string, UploadRowImportState>
+  >({});
+  const [pasteModalShelf, setPasteModalShelf] = useState<ShelfKey | null>(null);
+  const [pasteUploadText, setPasteUploadText] = useState("");
+  const [pasteUploadError, setPasteUploadError] = useState<string | null>(null);
   const lastPersistedShelfSnapshotRef = useRef<string | null>(null);
   const pendingShelfMutationRef = useRef<(() => void | Promise<void>) | null>(
     null,
@@ -669,8 +837,16 @@ export default function Home() {
   const isAnyModalOpen =
     modalOpen ||
     addModalShelf !== null ||
-    clearConfirmShelf !== null ||
-    editAuthOpen;
+    editAuthOpen ||
+    uploadMatchShelf !== null ||
+    pasteModalShelf !== null;
+  const displayedUploadRows = uploadMatchRows.filter(
+    (row) =>
+      row.candidates.length === 0 || Boolean(uploadRowImportState[row.id]),
+  );
+  const hasAnyRowImporting = Object.values(uploadRowImportState).some(
+    (state) => state.status === "importing",
+  );
 
   useEffect(() => {
     const styleId = "playhtml-hide-default-cursor-labels";
@@ -1085,12 +1261,28 @@ export default function Home() {
     setAddingBookId(null);
   }
 
-  function openClearConfirm(shelf: ShelfKey) {
-    setClearConfirmShelf(shelf);
+  function triggerAddModalCsvUpload() {
+    if (!addModalShelf) {
+      return;
+    }
+
+    const shelf = addModalShelf;
+    closeShelfAddModal();
+    requestShelfEditAuth(() => {
+      startShelfUpload(shelf);
+    });
   }
 
-  function closeClearConfirm() {
-    setClearConfirmShelf(null);
+  function triggerAddModalPasteUpload() {
+    if (!addModalShelf) {
+      return;
+    }
+
+    const shelf = addModalShelf;
+    closeShelfAddModal();
+    requestShelfEditAuth(() => {
+      openPasteUploadModal(shelf);
+    });
   }
 
   function requestShelfEditAuth(action: () => void | Promise<void>) {
@@ -1155,18 +1347,6 @@ export default function Home() {
     }
   }
 
-  function confirmClearShelf() {
-    const shelfToClear = clearConfirmShelf;
-    if (!shelfToClear) {
-      return;
-    }
-
-    closeClearConfirm();
-    requestShelfEditAuth(() => {
-      clearShelf(shelfToClear);
-    });
-  }
-
   async function addBookToShelf(shelf: ShelfKey, book: BookSuggestion) {
     setAddModalError(null);
     setAddingBookId(book.id);
@@ -1225,33 +1405,14 @@ export default function Home() {
     });
   }
 
-  async function resolveBookFromInput(input: CsvBookInput) {
-    console.log(
-      "[upload/search] submitting title:",
-      input.title,
-      "author:",
-      input.author,
-    );
-    const searchResponse = await fetch(
-      `/api/search?query=${encodeURIComponent(input.title)}`,
-    );
-
-    if (!searchResponse.ok) {
-      return null;
-    }
-
-    const searchPayload = (await searchResponse.json()) as {
-      results?: BookSuggestion[];
-    };
-    const candidates = searchPayload.results ?? [];
-
-    if (candidates.length === 0) {
-      return null;
-    }
-
+  function prioritizeUploadCandidates(
+    input: CsvBookInput,
+    candidates: BookSuggestion[],
+  ) {
     const normalizedTitle = input.title.trim().toLowerCase();
     const expectedAuthor = input.author?.trim() ?? "";
-    const prioritizedCandidates = [...candidates].sort((left, right) => {
+
+    return [...candidates].sort((left, right) => {
       const leftAuthorMatch = expectedAuthor
         ? isLikelyAuthorMatch(left.authors, expectedAuthor)
         : false;
@@ -1272,60 +1433,390 @@ export default function Home() {
 
       return leftExact ? -1 : 1;
     });
+  }
 
-    let coverAuthorMatch: BookDetails | null = null;
-    let coverFallback: BookDetails | null = null;
+  async function resolveUploadCandidates(input: CsvBookInput) {
+    const initialMatchQuery = input.title.trim() || input.title;
+    console.log("[Upload Match] Starting automatic match lookup", {
+      title: input.title,
+      author: input.author,
+      queryUsedForAutomaticMatch: initialMatchQuery,
+    });
 
-    for (const candidate of prioritizedCandidates) {
-      console.log(
-        "[upload/book] submitting candidate id:",
-        candidate.id,
-        "candidate title:",
-        candidate.title,
-        "for source title:",
-        input.title,
-        "source author:",
-        input.author,
+    let searchPayload: { results?: BookSuggestion[] } = { results: [] };
+    let attemptsUsed = 0;
+
+    try {
+      const searchResult = await fetchSearchResultsWithRetry(
+        initialMatchQuery,
+        "automatic_match",
       );
-      const bookResponse = await fetch(`/api/books/${candidate.id}`);
-      if (!bookResponse.ok) {
-        console.log(
-          "[upload/book] candidate failed:",
-          candidate.id,
-          "status:",
-          bookResponse.status,
-        );
-        continue;
-      }
-
-      const bookPayload = (await bookResponse.json()) as {
-        book: BookDetails | null;
+      searchPayload = { results: searchResult.results };
+      attemptsUsed = searchResult.attempt;
+    } catch (error) {
+      console.warn("[Upload Match] Automatic match lookup failed", {
+        queryUsedForAutomaticMatch: initialMatchQuery,
+        attemptsTried: UPLOAD_SEARCH_MAX_ATTEMPTS,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+      return {
+        candidates: [],
+        recommendedTitles: [],
       };
-
-      const resolvedBook = bookPayload.book;
-      if (!resolvedBook) {
-        continue;
-      }
-
-      const authorMatch = expectedAuthor
-        ? isLikelyAuthorMatch(resolvedBook.authors, expectedAuthor)
-        : false;
-
-      if (!resolvedBook.coverUrl) {
-        continue;
-      }
-
-      if (authorMatch || !expectedAuthor) {
-        coverAuthorMatch = resolvedBook;
-        break;
-      }
-
-      if (!coverFallback) {
-        coverFallback = resolvedBook;
-      }
     }
 
-    return coverAuthorMatch ?? coverFallback;
+    const recommendedTitles = prioritizeUploadCandidates(
+      input,
+      searchPayload.results ?? [],
+    ).slice(0, 3);
+
+    const candidates = recommendedTitles.filter((candidate) =>
+      Boolean(candidate.coverUrl),
+    );
+
+    console.log("[Upload Match] Automatic match results", {
+      queryUsedForAutomaticMatch: initialMatchQuery,
+      attemptsUsed,
+      automaticMatchFound: candidates.length > 0,
+      queryUsedForRecommendations: initialMatchQuery,
+      recommendationCountBeforeCoverFilter: recommendedTitles.length,
+      recommendations: recommendedTitles.map((candidate) => ({
+        id: candidate.id,
+        title: candidate.title,
+        authors: candidate.authors,
+        hasCover: Boolean(candidate.coverUrl),
+      })),
+      matchesWithCoverCount: candidates.length,
+    });
+
+    return {
+      candidates,
+      recommendedTitles,
+    };
+  }
+
+  function closeUploadMatchModal() {
+    if (uploadImporting || hasAnyRowImporting) {
+      return;
+    }
+
+    setUploadMatchShelf(null);
+    setUploadMatchRows([]);
+    setUploadMatchError(null);
+    setUploadDuplicateCount(0);
+    setUploadRowSearchState({});
+    setUploadRowImportState({});
+  }
+
+  function selectUploadCandidate(rowId: string, candidateId: string | null) {
+    setUploadMatchRows((current) =>
+      current.map((row) => {
+        if (row.id !== rowId) {
+          return row;
+        }
+
+        return {
+          ...row,
+          selectedCandidateId: candidateId,
+        };
+      }),
+    );
+  }
+
+  function deleteUploadMatchRow(rowId: string) {
+    setUploadMatchRows((current) => current.filter((row) => row.id !== rowId));
+    setUploadRowSearchState((current) => {
+      const next = { ...current };
+      delete next[rowId];
+      return next;
+    });
+    setUploadRowImportState((current) => {
+      const next = { ...current };
+      delete next[rowId];
+      return next;
+    });
+  }
+
+  function toggleUploadRowSearch(rowId: string, defaultQuery: string) {
+    setUploadRowSearchState((current) => {
+      const rowState = current[rowId];
+
+      if (!rowState) {
+        console.log("[Upload Search] Opened manual search for row", {
+          rowId,
+          defaultSearchQuery: defaultQuery,
+        });
+        return {
+          ...current,
+          [rowId]: {
+            open: true,
+            query: defaultQuery,
+            loading: false,
+            results: [],
+            error: null,
+          },
+        };
+      }
+
+      return {
+        ...current,
+        [rowId]: {
+          ...rowState,
+          open: !rowState.open,
+          error: null,
+        },
+      };
+    });
+  }
+
+  function setUploadRowSearchQuery(rowId: string, query: string) {
+    setUploadRowSearchState((current) => ({
+      ...current,
+      [rowId]: {
+        open: true,
+        query,
+        loading: false,
+        results: current[rowId]?.results ?? [],
+        error: null,
+      },
+    }));
+  }
+
+  async function searchUploadRowCandidates(rowId: string) {
+    const row = uploadMatchRows.find((item) => item.id === rowId);
+    const rowState = uploadRowSearchState[rowId];
+    const normalizedQuery = rowState?.query.trim() ?? "";
+    const initialMatchQuery = row?.sourceTitle.trim() ?? "";
+
+    if (!row || normalizedQuery.length < MIN_QUERY_LENGTH) {
+      console.log("[Upload Search] Skipped manual search", {
+        rowId,
+        reason: !row ? "row_not_found" : "query_too_short",
+        minQueryLength: MIN_QUERY_LENGTH,
+        attemptedSearchQuery: normalizedQuery,
+      });
+      return;
+    }
+
+    console.log("[Upload Search] Running manual search", {
+      rowId,
+      originalAutomaticMatchQuery: initialMatchQuery,
+      manualSearchQuery: normalizedQuery,
+      manualQueryMatchesOriginal:
+        initialMatchQuery.toLowerCase() === normalizedQuery.toLowerCase(),
+    });
+
+    setUploadRowSearchState((current) => ({
+      ...current,
+      [rowId]: {
+        open: true,
+        query: normalizedQuery,
+        loading: true,
+        results: current[rowId]?.results ?? [],
+        error: null,
+      },
+    }));
+
+    try {
+      const searchResult = await fetchSearchResultsWithRetry(
+        normalizedQuery,
+        "manual_row_search",
+      );
+      const payload = {
+        results: searchResult.results,
+      };
+
+      const results = prioritizeUploadCandidates(
+        {
+          title: row.sourceTitle,
+          author: row.sourceAuthor,
+        },
+        payload.results ?? [],
+      )
+        .filter((candidate) => Boolean(candidate.coverUrl))
+        .slice(0, 8);
+
+      console.log("[Upload Search] Manual search results", {
+        rowId,
+        manualSearchQuery: normalizedQuery,
+        attemptsUsed: searchResult.attempt,
+        manualSearchResultCount: results.length,
+        results: results.map((candidate) => ({
+          id: candidate.id,
+          title: candidate.title,
+          authors: candidate.authors,
+        })),
+      });
+
+      setUploadRowSearchState((current) => ({
+        ...current,
+        [rowId]: {
+          open: true,
+          query: normalizedQuery,
+          loading: false,
+          results,
+          error: null,
+        },
+      }));
+    } catch (error) {
+      setUploadRowSearchState((current) => ({
+        ...current,
+        [rowId]: {
+          open: true,
+          query: normalizedQuery,
+          loading: false,
+          results: current[rowId]?.results ?? [],
+          error:
+            error instanceof Error
+              ? error.message
+              : "Unable to search right now.",
+        },
+      }));
+
+      console.warn("[Upload Search] Manual search failed", {
+        rowId,
+        manualSearchQuery: normalizedQuery,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+
+  function applyUploadSearchCandidate(
+    rowId: string,
+    candidate: BookSuggestion,
+  ) {
+    const row = uploadMatchRows.find((item) => item.id === rowId);
+
+    setUploadMatchRows((current) =>
+      current.map((row) => {
+        if (row.id !== rowId) {
+          return row;
+        }
+
+        return {
+          ...row,
+          candidates: [candidate],
+          selectedCandidateId: candidate.id,
+        };
+      }),
+    );
+
+    setUploadRowSearchState((current) => ({
+      ...current,
+      [rowId]: {
+        open: false,
+        query: current[rowId]?.query ?? "",
+        loading: false,
+        results: current[rowId]?.results ?? [],
+        error: null,
+      },
+    }));
+
+    if (row) {
+      void importUploadRow(row, candidate);
+    }
+  }
+
+  async function importUploadRow(
+    row: UploadMatchRow,
+    candidate: BookSuggestion,
+  ) {
+    if (!uploadMatchShelf) {
+      return;
+    }
+
+    const submittedLabel = row.sourceAuthor
+      ? `${row.sourceTitle} by ${row.sourceAuthor}`
+      : row.sourceTitle;
+
+    setUploadMatchError(null);
+    setUploadImporting(true);
+    setUploadRowImportState((current) => ({
+      ...current,
+      [row.id]: {
+        status: "importing",
+        message: "Importing selected title...",
+      },
+    }));
+    setShelfPatch(uploadMatchShelf, {
+      loading: true,
+      error: null,
+      submittingTitle: submittedLabel,
+    });
+
+    try {
+      const response = await fetch(`/api/books/${candidate.id}`);
+
+      if (!response.ok) {
+        throw new Error("Could not load selected book details.");
+      }
+
+      const payload = (await response.json()) as { book: BookDetails | null };
+      if (!payload.book) {
+        throw new Error("Book details were empty.");
+      }
+
+      appendBooksToShelf(uploadMatchShelf, [
+        {
+          sourceTitle: row.sourceTitle,
+          sourceAuthor: row.sourceAuthor,
+          book: payload.book,
+        },
+      ]);
+
+      setUploadRowImportState((current) => ({
+        ...current,
+        [row.id]: {
+          status: "success",
+          message: "Imported successfully.",
+        },
+      }));
+      setCollapsedShelves((current) => ({
+        ...current,
+        [uploadMatchShelf]: false,
+      }));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not import this title.";
+
+      setUploadRowImportState((current) => ({
+        ...current,
+        [row.id]: {
+          status: "error",
+          message,
+        },
+      }));
+      setUploadMatchError("One or more titles failed to import.");
+    } finally {
+      setShelfPatch(uploadMatchShelf, {
+        loading: false,
+        submittingTitle: null,
+      });
+      setUploadImporting(false);
+    }
+  }
+
+  function retryUploadRow(rowId: string) {
+    const row = uploadMatchRows.find((item) => item.id === rowId);
+    if (!row) {
+      return;
+    }
+
+    const candidate = row.candidates.find(
+      (item) => item.id === row.selectedCandidateId,
+    );
+    if (!candidate) {
+      setUploadRowImportState((current) => ({
+        ...current,
+        [rowId]: {
+          status: "error",
+          message: "Pick a title before retrying import.",
+        },
+      }));
+      return;
+    }
+
+    void importUploadRow(row, candidate);
   }
 
   function setShelfPatch(shelf: ShelfKey, patch: Partial<ShelfState>) {
@@ -1345,13 +1836,6 @@ export default function Home() {
         ...current[shelf],
         books: mergeUniqueShelfBooks(current[shelf].books, nextRows),
       },
-    }));
-  }
-
-  function clearShelf(shelf: ShelfKey) {
-    setShelves((current) => ({
-      ...current,
-      [shelf]: createShelfState(),
     }));
   }
 
@@ -1482,6 +1966,149 @@ export default function Home() {
     csvInputRef.current?.click();
   }
 
+  function openPasteUploadModal(shelf: ShelfKey) {
+    setPasteModalShelf(shelf);
+    setPasteUploadText("");
+    setPasteUploadError(null);
+  }
+
+  function closePasteUploadModal() {
+    setPasteModalShelf(null);
+    setPasteUploadText("");
+    setPasteUploadError(null);
+  }
+
+  async function buildUploadMatchRows(
+    shelf: ShelfKey,
+    entries: CsvBookInput[],
+    sourceLabel: "CSV" | "pasted list",
+  ) {
+    setUploadRowImportState({});
+
+    const existingKeys = new Set<string>();
+    for (const item of shelves[shelf].books) {
+      const sourceKey = normalizeMatchValue(item.sourceTitle);
+      if (sourceKey) {
+        existingKeys.add(sourceKey);
+      }
+
+      const resolvedTitle = item.book?.title ?? "";
+      const resolvedKey = normalizeMatchValue(resolvedTitle);
+      if (resolvedKey) {
+        existingKeys.add(resolvedKey);
+      }
+    }
+
+    const nextMatchRows: UploadMatchRow[] = [];
+    let duplicatesFound = 0;
+
+    for (const entry of entries) {
+      const entryKey = normalizeMatchValue(entry.title);
+      if (entryKey && existingKeys.has(entryKey)) {
+        duplicatesFound += 1;
+        continue;
+      }
+
+      const submittedLabel = entry.author
+        ? `${entry.title} by ${entry.author}`
+        : entry.title;
+
+      setShelfPatch(shelf, { submittingTitle: submittedLabel });
+
+      const resolution = await resolveUploadCandidates(entry).catch(() => ({
+        candidates: [],
+        recommendedTitles: [],
+      }));
+      const rowId = crypto.randomUUID();
+
+      console.log("[Upload Match] Added row to match modal", {
+        source: sourceLabel,
+        rowId,
+        sourceTitle: entry.title,
+        queryUsedForAutomaticMatch: entry.title.trim() || entry.title,
+      });
+
+      nextMatchRows.push({
+        id: rowId,
+        sourceTitle: entry.title,
+        sourceAuthor: entry.author,
+        candidates: resolution.candidates,
+        recommendedTitles: resolution.recommendedTitles,
+        selectedCandidateId: resolution.candidates[0]?.id ?? null,
+      });
+    }
+
+    setUploadMatchRows(nextMatchRows);
+    setUploadDuplicateCount(duplicatesFound);
+    setUploadRowSearchState(
+      Object.fromEntries(
+        nextMatchRows.map((row) => [
+          row.id,
+          {
+            open: false,
+            query: row.sourceTitle,
+            loading: false,
+            results: [],
+            error: null,
+          } satisfies UploadRowSearchState,
+        ]),
+      ),
+    );
+    setCollapsedShelves((current) => ({
+      ...current,
+      [shelf]: false,
+    }));
+    setUploadMatchShelf(shelf);
+    setUploadMatchError(null);
+
+    return {
+      createdRows: nextMatchRows.length,
+      duplicatesFound,
+    };
+  }
+
+  async function submitPastedUploadList(
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
+    event.preventDefault();
+
+    const shelf = pasteModalShelf;
+    if (!shelf) {
+      return;
+    }
+
+    setPasteUploadError(null);
+    setShelfPatch(shelf, {
+      loading: true,
+      error: null,
+      submittingTitle: null,
+    });
+
+    try {
+      const entries = getBookInputsFromPastedList(pasteUploadText);
+      if (entries.length === 0) {
+        throw new Error("No titles found. Paste one title per line.");
+      }
+
+      await buildUploadMatchRows(shelf, entries, "pasted list");
+      closePasteUploadModal();
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Could not process pasted titles.";
+      setPasteUploadError(message);
+      setShelfPatch(shelf, {
+        error: message,
+      });
+    } finally {
+      setShelfPatch(shelf, {
+        loading: false,
+        submittingTitle: null,
+      });
+    }
+  }
+
   async function handleCsvUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     const file = input.files?.[0];
@@ -1504,33 +2131,7 @@ export default function Home() {
       if (entries.length === 0) {
         throw new Error("No titles found in the second column.");
       }
-
-      const nextRows: UploadedCsvBook[] = [];
-
-      for (const entry of entries) {
-        const submittedLabel = entry.author
-          ? `${entry.title} by ${entry.author}`
-          : entry.title;
-
-        setShelfPatch(shelf, { submittingTitle: submittedLabel });
-
-        try {
-          const book = await resolveBookFromInput(entry);
-          nextRows.push({
-            sourceTitle: entry.title,
-            sourceAuthor: entry.author,
-            book,
-          });
-        } catch {
-          nextRows.push({
-            sourceTitle: entry.title,
-            sourceAuthor: entry.author,
-            book: null,
-          });
-        }
-      }
-
-      appendBooksToShelf(shelf, nextRows);
+      await buildUploadMatchRows(shelf, entries, "CSV");
     } catch (error) {
       setShelfPatch(shelf, {
         error:
@@ -1586,31 +2187,11 @@ export default function Home() {
           <button
             type="button"
             onClick={() => {
-              requestShelfEditAuth(() => {
-                startShelfUpload(shelf);
-              });
-            }}
-            className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
-          >
-            upload
-          </button>
-          <button
-            type="button"
-            onClick={() => {
               openShelfAddModal(shelf);
             }}
             className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
           >
             add
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              openClearConfirm(shelf);
-            }}
-            className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
-          >
-            clear
           </button>
           {shelfState.loading ? <div>loading books...</div> : null}
           {shelfState.submittingTitle ? (
@@ -1870,6 +2451,23 @@ export default function Home() {
             </button>
 
             <div className="text-lg">add a book</div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <button
+                type="button"
+                onClick={triggerAddModalCsvUpload}
+                className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+              >
+                upload csv
+              </button>
+              <button
+                type="button"
+                onClick={triggerAddModalPasteUpload}
+                className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+              >
+                paste list
+              </button>
+              <span>or search and select below</span>
+            </div>
             <input
               value={addQuery}
               onChange={(event) => {
@@ -1935,44 +2533,6 @@ export default function Home() {
         </div>
       ) : null}
 
-      {clearConfirmShelf ? (
-        <div
-          className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
-          style={{ zIndex: 2147483647 }}
-        >
-          <div
-            className="relative w-full max-w-md bg-white p-5"
-            style={{ border: "1px solid #235848" }}
-          >
-            <div className="text-lg">are you sure?</div>
-            <div className="mt-3 text-sm">
-              {clearConfirmShelf === "wantToRead"
-                ? "This will clear all books from want to read."
-                : clearConfirmShelf === "currentlyReading"
-                  ? "This will clear all books from currently reading."
-                  : "This will clear all books from books i've read."}
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={closeClearConfirm}
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
-              >
-                cancel
-              </button>
-              <button
-                type="button"
-                onClick={confirmClearShelf}
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
-              >
-                clear shelf
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {editAuthOpen ? (
         <div
           className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
@@ -2024,6 +2584,315 @@ export default function Home() {
                 className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
               >
                 {editAuthLoading ? "checking..." : "unlock"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {uploadMatchShelf ? (
+        <div
+          className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          style={{ zIndex: 2147483647 }}
+        >
+          <div
+            className="relative w-full max-w-4xl bg-white p-5"
+            style={{ border: "1px solid #235848" }}
+          >
+            <button
+              type="button"
+              onClick={closeUploadMatchModal}
+              disabled={uploadImporting}
+              className="absolute right-2 top-2 border-0 bg-transparent p-0 text-base leading-none transition-opacity hover:opacity-70 disabled:cursor-not-allowed"
+              aria-label="close"
+            >
+              x
+            </button>
+
+            <div className="text-lg">pick matches to import</div>
+            <div className="mt-2 text-sm">
+              Showing rows that need help. Search and pick a title to import
+              immediately.
+            </div>
+            {uploadDuplicateCount > 0 ? (
+              <div className="mt-2 text-sm">
+                {`${uploadDuplicateCount} duplicates already on this shelf were skipped.`}
+              </div>
+            ) : null}
+
+            <div className="mt-4 max-h-[65vh] overflow-auto border border-[#235848]">
+              {displayedUploadRows.length === 0 ? (
+                <div className="p-3 text-sm">
+                  all unmatched rows were handled. click done to close.
+                </div>
+              ) : null}
+
+              {displayedUploadRows.map((row) => {
+                const rowSearchState = uploadRowSearchState[row.id];
+                const importState = uploadRowImportState[row.id];
+                const isImportingThisRow = importState?.status === "importing";
+                const isImportedThisRow = importState?.status === "success";
+                const importFailedThisRow = importState?.status === "error";
+
+                return (
+                  <div
+                    key={row.id}
+                    className="border-b border-[#235848] p-3 last:border-b-0"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="text-sm font-medium">
+                        {row.sourceAuthor
+                          ? `${row.sourceTitle} - ${row.sourceAuthor}`
+                          : row.sourceTitle}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {row.candidates.length === 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              toggleUploadRowSearch(row.id, row.sourceTitle);
+                            }}
+                            disabled={isImportingThisRow || isImportedThisRow}
+                            className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3]"
+                            aria-label={`search ${row.sourceTitle}`}
+                          >
+                            ⌕
+                          </button>
+                        ) : null}
+                        {importFailedThisRow ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              retryUploadRow(row.id);
+                            }}
+                            disabled={isImportingThisRow}
+                            className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+                          >
+                            retry
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            deleteUploadMatchRow(row.id);
+                          }}
+                          disabled={isImportingThisRow}
+                          className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3]"
+                          aria-label={`delete ${row.sourceTitle}`}
+                        >
+                          x delete
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {row.candidates.map((candidate) => {
+                        const isSelected =
+                          row.selectedCandidateId === candidate.id;
+                        return (
+                          <button
+                            key={candidate.id}
+                            type="button"
+                            onClick={() => {
+                              selectUploadCandidate(row.id, candidate.id);
+                            }}
+                            disabled={isImportingThisRow || isImportedThisRow}
+                            className="flex items-center gap-2 border border-[#235848] px-2 py-1 text-left transition-colors hover:bg-[#dbe3c3]"
+                            style={{
+                              backgroundColor: isSelected
+                                ? "#dbe3c3"
+                                : undefined,
+                            }}
+                          >
+                            <div className="h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                              {candidate.coverUrl ? (
+                                <img
+                                  src={candidate.coverUrl}
+                                  alt=""
+                                  className="h-full w-full object-cover"
+                                />
+                              ) : null}
+                            </div>
+                            <div className="text-xs">
+                              <div>{candidate.title}</div>
+                              <div>{candidate.authors}</div>
+                            </div>
+                          </button>
+                        );
+                      })}
+
+                      {row.candidates.length === 0 ? (
+                        <div className="text-xs">no cover found</div>
+                      ) : null}
+                    </div>
+
+                    {!row.selectedCandidateId ? (
+                      <div className="mt-2 text-xs">
+                        choose a match or delete this row
+                      </div>
+                    ) : null}
+
+                    {importState ? (
+                      <div className="mt-2 text-xs">
+                        {importState.status === "success"
+                          ? `import success: ${importState.message}`
+                          : importState.status === "error"
+                            ? `import failed: ${importState.message}`
+                            : importState.message}
+                      </div>
+                    ) : null}
+
+                    {row.candidates.length === 0 && rowSearchState?.open ? (
+                      <div className="mt-3 border border-[#235848] p-2">
+                        <div className="flex items-center gap-2">
+                          <input
+                            value={rowSearchState.query}
+                            onChange={(event) => {
+                              setUploadRowSearchQuery(
+                                row.id,
+                                event.target.value,
+                              );
+                            }}
+                            placeholder="search by title"
+                            className="w-full border border-[#235848] px-2 py-1 text-xs"
+                            autoComplete="off"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void searchUploadRowCandidates(row.id);
+                            }}
+                            disabled={
+                              isImportingThisRow ||
+                              isImportedThisRow ||
+                              rowSearchState.loading ||
+                              rowSearchState.query.trim().length <
+                                MIN_QUERY_LENGTH
+                            }
+                            className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+                          >
+                            {rowSearchState.loading ? "searching..." : "search"}
+                          </button>
+                        </div>
+
+                        {rowSearchState.error ? (
+                          <div className="mt-2 text-xs">
+                            {rowSearchState.error}
+                          </div>
+                        ) : null}
+
+                        {rowSearchState.results.length > 0 ? (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {rowSearchState.results.map((candidate) => (
+                              <button
+                                key={`${row.id}-${candidate.id}`}
+                                type="button"
+                                onClick={() => {
+                                  applyUploadSearchCandidate(row.id, candidate);
+                                }}
+                                disabled={
+                                  isImportingThisRow || isImportedThisRow
+                                }
+                                className="flex items-center gap-2 border border-[#235848] px-2 py-1 text-left transition-colors hover:bg-[#dbe3c3]"
+                              >
+                                <div className="h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                                  {candidate.coverUrl ? (
+                                    <img
+                                      src={candidate.coverUrl}
+                                      alt=""
+                                      className="h-full w-full object-cover"
+                                    />
+                                  ) : null}
+                                </div>
+                                <div className="text-xs">
+                                  <div>{candidate.title}</div>
+                                  <div>{candidate.authors}</div>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+
+            {uploadMatchError ? (
+              <div className="mt-3 text-sm">{uploadMatchError}</div>
+            ) : null}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeUploadMatchModal}
+                disabled={uploadImporting || hasAnyRowImporting}
+                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                done
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {pasteModalShelf ? (
+        <div
+          className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          style={{ zIndex: 2147483647 }}
+        >
+          <form
+            onSubmit={submitPastedUploadList}
+            className="relative w-full max-w-2xl bg-white p-5"
+            style={{ border: "1px solid #235848" }}
+          >
+            <button
+              type="button"
+              onClick={closePasteUploadModal}
+              className="absolute right-2 top-2 border-0 bg-transparent p-0 text-base leading-none transition-opacity hover:opacity-70"
+              aria-label="close"
+            >
+              x
+            </button>
+
+            <div className="text-lg">paste books to upload</div>
+            <div className="mt-2 text-sm">
+              Paste one title per line. Optional author formats: title, author
+              or title | author or tab-separated.
+            </div>
+            <textarea
+              value={pasteUploadText}
+              onChange={(event) => {
+                setPasteUploadText(event.target.value);
+                setPasteUploadError(null);
+              }}
+              placeholder={
+                "Dune\nThe Left Hand of Darkness\nHow Should a Person Be?, Sheila Heti"
+              }
+              className="mt-3 h-72 w-full border border-[#235848] px-3 py-2"
+              spellCheck={false}
+              autoFocus
+            />
+
+            {pasteUploadError ? (
+              <div className="mt-3 text-sm">{pasteUploadError}</div>
+            ) : null}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closePasteUploadModal}
+                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
+              >
+                cancel
+              </button>
+              <button
+                type="submit"
+                disabled={pasteUploadText.trim().length === 0}
+                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                find matches
               </button>
             </div>
           </form>
