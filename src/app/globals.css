@@ -70,3 +70,18 @@ body.profile-modal-open [class*="playhtml-cursor"] {
 .dropdown-item:hover {
   background: var(--hover-army);
 }
+
+@keyframes book-window-open {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.book-window {
+  animation: book-window-open 120ms steps(4, end);
+}

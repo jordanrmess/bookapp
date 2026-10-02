@@ -785,6 +785,54 @@ const DEFAULT_SITE_COLORS: SiteColors = {
 const SITE_COLORS_ELEMENT_ID = "site-colors";
 const SITE_COLOR_WRITE_DELAY_MS = 150;
 
+function hslToHex(h: number, s: number, l: number): string {
+  const a = s * Math.min(l, 1 - l);
+  const channel = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const value = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(value * 255)
+      .toString(16)
+      .padStart(2, "0");
+  };
+  return `#${channel(0)}${channel(8)}${channel(4)}`;
+}
+
+function relativeLuminance(hex: string): number {
+  const [r, g, b] = [1, 3, 5].map((i) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrastRatio(a: string, b: string): number {
+  const [light, dark] = [relativeLuminance(a), relativeLuminance(b)].sort(
+    (x, y) => y - x,
+  );
+  return (light + 0.05) / (dark + 0.05);
+}
+
+// A random background plus a text color from the same hue family, nudged
+// darker or lighter until the pair stays comfortably readable.
+function randomSiteColors(): SiteColors {
+  const hue = Math.random() * 360;
+  const darkMode = Math.random() < 0.35;
+  const background = hslToHex(
+    hue,
+    0.45 + Math.random() * 0.4,
+    darkMode ? 0.12 + Math.random() * 0.1 : 0.72 + Math.random() * 0.18,
+  );
+  const textHue =
+    (hue + (Math.random() < 0.5 ? 0 : 30 + Math.random() * 30)) % 360;
+  let lightness = darkMode ? 0.8 : 0.22;
+  let text = hslToHex(textHue, 0.5, lightness);
+  for (let i = 0; i < 20 && contrastRatio(background, text) < 7; i++) {
+    lightness += darkMode ? 0.02 : -0.02;
+    text = hslToHex(textHue, 0.5, Math.min(0.98, Math.max(0.02, lightness)));
+  }
+  return { background, text };
+}
+
 function isHexColor(value: unknown): value is string {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
 }
@@ -792,6 +840,13 @@ function isHexColor(value: unknown): value is string {
 export default function Home() {
   const [modalOpen, setModalOpen] = useState(false);
   const [colorsModalOpen, setColorsModalOpen] = useState(false);
+  const [uploadMatchHidden, setUploadMatchHidden] = useState(false);
+  const [bookWindow, setBookWindow] = useState<BookDetails | null>(null);
+  const [bookWindowDetails, setBookWindowDetails] =
+    useState<BookDetails | null>(null);
+  const [bookWindowStatus, setBookWindowStatus] = useState<
+    "loading" | "done" | "error"
+  >("loading");
   const [nameInput, setNameInput] = useState("");
   const [bookQuery, setBookQuery] = useState("");
   const [bookResults, setBookResults] = useState<BookSuggestion[]>([]);
@@ -862,12 +917,22 @@ export default function Home() {
   const suppressNextSearchRef = useRef(false);
   const csvInputRef = useRef<HTMLInputElement | null>(null);
   const pendingUploadShelfRef = useRef<ShelfKey>("booksRead");
+  // Drafts kept when a modal is dismissed by clicking outside it. They only
+  // live in memory, so they last until the person leaves the page.
+  const profileDraftRef = useRef(false);
+  const addDraftShelfRef = useRef<ShelfKey | null>(null);
+  const pasteDraftShelfRef = useRef<ShelfKey | null>(null);
+  const backdropPressedRef = useRef(false);
+  const [modalOffsets, setModalOffsets] = useState<
+    Record<string, { x: number; y: number }>
+  >({});
   const isAnyModalOpen =
     modalOpen ||
     addModalShelf !== null ||
     editAuthOpen ||
-    uploadMatchShelf !== null ||
-    pasteModalShelf !== null;
+    (uploadMatchShelf !== null && !uploadMatchHidden) ||
+    pasteModalShelf !== null ||
+    bookWindow !== null;
   const displayedUploadRows = uploadMatchRows.filter(
     (row) =>
       row.candidates.length === 0 || Boolean(uploadRowImportState[row.id]),
@@ -889,6 +954,12 @@ export default function Home() {
       }
     };
   }, []);
+
+  function shuffleSiteColors() {
+    const next = randomSiteColors();
+    updateSiteColor("background", next.background);
+    updateSiteColor("text", next.text);
+  }
 
   function updateSiteColor(key: keyof SiteColors, value: string) {
     // Preview locally right away; the shared write is debounced so dragging
@@ -1374,6 +1445,76 @@ export default function Home() {
     };
   }, [addQuery, addModalShelf]);
 
+  useEffect(() => {
+    if (!bookWindow) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    void (async () => {
+      try {
+        // Stored books don't keep the Hardcover id, so find it by search and
+        // match on slug (falling back to title) before loading the details.
+        const query = `${bookWindow.title} ${bookWindow.authors}`.trim();
+        const searchResponse = await fetch(
+          `/api/search?query=${encodeURIComponent(query)}`,
+          { signal },
+        );
+        if (!searchResponse.ok) {
+          throw new Error("search failed");
+        }
+        const { results = [] } = (await searchResponse.json()) as {
+          results?: BookSuggestion[];
+        };
+        const normalizedTitle = bookWindow.title.trim().toLowerCase();
+        const match =
+          results.find(
+            (result) => bookWindow.slug && result.slug === bookWindow.slug,
+          ) ??
+          results.find(
+            (result) => result.title.trim().toLowerCase() === normalizedTitle,
+          ) ??
+          results[0];
+        if (!match) {
+          throw new Error("no match");
+        }
+
+        const detailsResponse = await fetch(
+          `/api/books/${encodeURIComponent(match.id)}`,
+          { signal },
+        );
+        if (!detailsResponse.ok) {
+          throw new Error("details failed");
+        }
+        const { book } = (await detailsResponse.json()) as {
+          book?: BookDetails;
+        };
+        if (!book) {
+          throw new Error("no details");
+        }
+
+        setBookWindowDetails(book);
+        setBookWindowStatus("done");
+      } catch {
+        if (!signal.aborted) {
+          setBookWindowStatus("error");
+        }
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [bookWindow]);
+
+  function openBookWindow(book: BookDetails) {
+    setBookWindowDetails(null);
+    setBookWindowStatus("loading");
+    setBookWindow(book);
+  }
+
   async function chooseBook(book: BookSuggestion) {
     setModalError(null);
     try {
@@ -1421,10 +1562,104 @@ export default function Home() {
       cursorsGlobal.name = nextName;
     }
 
+    profileDraftRef.current = false;
     setModalOpen(false);
   }
 
+  function dismissModal() {
+    profileDraftRef.current = true;
+    setModalOpen(false);
+  }
+
+  // Spreads onto a modal backdrop. Only dismisses when the press and the
+  // release both land on the backdrop, so dragging a text selection out of a
+  // modal doesn't close it.
+  function backdropProps(onDismiss: () => void) {
+    return {
+      onMouseDown: (event: React.MouseEvent<HTMLElement>) => {
+        backdropPressedRef.current = event.target === event.currentTarget;
+      },
+      onClick: (event: React.MouseEvent<HTMLElement>) => {
+        const pressedBackdrop = backdropPressedRef.current;
+        backdropPressedRef.current = false;
+        if (pressedBackdrop && event.target === event.currentTarget) {
+          onDismiss();
+        }
+      },
+    };
+  }
+
+  // Makes a modal box draggable by any part of it that isn't interactive.
+  // The offset is kept per modal, so a moved modal stays put when reopened.
+  function movable(id: string, style?: React.CSSProperties) {
+    const offset = modalOffsets[id] ?? { x: 0, y: 0 };
+
+    return {
+      style: {
+        ...style,
+        translate: `${offset.x}px ${offset.y}px`,
+        cursor: "move",
+      } satisfies React.CSSProperties,
+      onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
+        startModalDrag(id, event);
+      },
+    };
+  }
+
+  function startModalDrag(id: string, event: React.PointerEvent<HTMLElement>) {
+    if (event.button !== 0 || event.pointerType === "touch") {
+      return;
+    }
+
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, select, button, a, label, img")) {
+      return;
+    }
+    // Leave scrollbar presses alone so scrolling a list doesn't move the box.
+    if (
+      target.scrollHeight > target.clientHeight &&
+      event.nativeEvent.offsetX >= target.clientWidth
+    ) {
+      return;
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    const start = modalOffsets[id] ?? { x: 0, y: 0 };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const margin = 48;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+
+    const onMove = (moveEvent: PointerEvent) => {
+      // Keep a corner of the box on screen so it can't be lost off the edge.
+      const dx = Math.min(
+        Math.max(moveEvent.clientX - startX, margin - rect.width - rect.left),
+        window.innerWidth - margin - rect.left,
+      );
+      const dy = Math.min(
+        Math.max(moveEvent.clientY - startY, -rect.top),
+        window.innerHeight - margin - rect.top,
+      );
+      setModalOffsets((current) => ({
+        ...current,
+        [id]: { x: start.x + dx, y: start.y + dy },
+      }));
+    };
+    const onUp = () => {
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }
+
   function closeModal() {
+    profileDraftRef.current = false;
     setModalError(null);
 
     if (!activeCursorImage) {
@@ -1445,6 +1680,9 @@ export default function Home() {
 
   function openShelfAddModal(shelf: ShelfKey) {
     setAddModalShelf(shelf);
+    if (addDraftShelfRef.current === shelf) {
+      return;
+    }
     setAddQuery("");
     setAddResults([]);
     setAddSearchLoading(false);
@@ -1452,7 +1690,14 @@ export default function Home() {
     setAddingBookId(null);
   }
 
+  function dismissShelfAddModal() {
+    addDraftShelfRef.current = addModalShelf;
+    setAddSearchLoading(false);
+    setAddModalShelf(null);
+  }
+
   function closeShelfAddModal() {
+    addDraftShelfRef.current = null;
     setAddModalShelf(null);
     setAddQuery("");
     setAddResults([]);
@@ -1700,6 +1945,7 @@ export default function Home() {
       return;
     }
 
+    setUploadMatchHidden(false);
     setUploadMatchShelf(null);
     setUploadMatchRows([]);
     setUploadMatchError(null);
@@ -2168,11 +2414,20 @@ export default function Home() {
 
   function openPasteUploadModal(shelf: ShelfKey) {
     setPasteModalShelf(shelf);
+    if (pasteDraftShelfRef.current === shelf) {
+      return;
+    }
     setPasteUploadText("");
     setPasteUploadError(null);
   }
 
+  function dismissPasteUploadModal() {
+    pasteDraftShelfRef.current = pasteModalShelf;
+    setPasteModalShelf(null);
+  }
+
   function closePasteUploadModal() {
+    pasteDraftShelfRef.current = null;
     setPasteModalShelf(null);
     setPasteUploadText("");
     setPasteUploadError(null);
@@ -2258,6 +2513,7 @@ export default function Home() {
       ...current,
       [shelf]: false,
     }));
+    setUploadMatchHidden(false);
     setUploadMatchShelf(shelf);
     setUploadMatchError(null);
 
@@ -2356,7 +2612,7 @@ export default function Home() {
 
     return (
       <section
-        className="border-t border-[#235848] bg-(--site-bg) px-3 py-2"
+        className="border-t border-(--foreground) bg-(--site-bg) px-3 py-2"
         onDragOver={(event) => {
           handleShelfDragOver(event, shelf);
         }}
@@ -2389,7 +2645,7 @@ export default function Home() {
             onClick={() => {
               openShelfAddModal(shelf);
             }}
-            className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+            className="border border-(--foreground) px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
           >
             add
           </button>
@@ -2432,6 +2688,14 @@ export default function Home() {
                       setDraggedShelfBook(payload);
                     }}
                     onDragEnd={handleShelfDragEnd}
+                    onDoubleClick={(event) => {
+                      if ((event.target as HTMLElement).closest("button")) {
+                        return;
+                      }
+                      if (item.book) {
+                        openBookWindow(item.book);
+                      }
+                    }}
                     style={{
                       opacity: isDragged ? 0.45 : 1,
                       cursor: "grab",
@@ -2462,7 +2726,7 @@ export default function Home() {
                           }}
                         />
 
-                        <div className="pointer-events-none absolute inset-0 flex flex-col justify-end bg-white/90 p-2 text-xs opacity-0 transition-opacity group-hover:opacity-100">
+                        <div className="pointer-events-none absolute inset-0 flex flex-col justify-end bg-(--site-bg)/90 p-2 text-xs opacity-0 transition-opacity group-hover:opacity-100">
                           <div>{item.book.title}</div>
                           <div>{item.book.authors}</div>
                         </div>
@@ -2510,15 +2774,37 @@ export default function Home() {
           onChange={handleCsvUpload}
           className="hidden"
         />
-        <div className="text-lg">stacks</div>
+        <button
+          type="button"
+          onClick={shuffleSiteColors}
+          className="cursor-pointer border-0 bg-transparent p-0 text-left leading-none"
+          style={{
+            fontFamily: "var(--font-jacquarda-bastarda), serif",
+            fontSize: "3.375rem",
+          }}
+          title="shuffle colors"
+        >
+          stacks
+        </button>
         <div className="flex items-center gap-2">
           <div id={SITE_COLORS_ELEMENT_ID} hidden />
+          {uploadMatchShelf && uploadMatchHidden ? (
+            <button
+              type="button"
+              onClick={() => {
+                setUploadMatchHidden(false);
+              }}
+              className="border border-(--foreground) bg-(--site-bg) px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
+            >
+              resume import
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => {
               setColorsModalOpen(true);
             }}
-            className="flex items-center justify-center border border-[#235848] bg-(--site-bg) p-1.5 transition-colors hover:bg-[#dbe3c3]"
+            className="flex items-center justify-center border border-(--foreground) bg-(--site-bg) p-1.5 transition-colors hover:bg-[#dbe3c3]"
             aria-label="site colors"
             title="site colors"
           >
@@ -2543,11 +2829,14 @@ export default function Home() {
             type="button"
             onClick={() => {
               setModalOpen(true);
+              if (profileDraftRef.current) {
+                return;
+              }
               setModalError(null);
               setNameInput(activeName);
               setBookQuery(selectedBook?.title ?? "");
             }}
-            className="border border-[#235848] bg-(--site-bg) px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
+            className="border border-(--foreground) bg-(--site-bg) px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
           >
             set my cursor
           </button>
@@ -2556,14 +2845,122 @@ export default function Home() {
 
       <div className="flex-1" />
 
+      {bookWindow
+        ? (() => {
+            const shown = bookWindowDetails ?? bookWindow;
+            const description = shown.description
+              ?.replace(/<[^>]*>/g, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+            const facts: Array<[string, string]> = [
+              ["author", shown.authors || "unknown"],
+              [
+                "year",
+                shown.releaseYear ? String(shown.releaseYear) : "unknown",
+              ],
+              ["pages", shown.pages ? String(shown.pages) : "unknown"],
+              [
+                "rating",
+                typeof shown.rating === "number"
+                  ? `${shown.rating.toFixed(1)} / 5`
+                  : "unrated",
+              ],
+            ];
+
+            return (
+              <div
+                className="fixed inset-0 flex items-center justify-center bg-black/20 p-4"
+                {...backdropProps(() => setBookWindow(null))}
+                style={{ zIndex: 2147483647 }}
+              >
+                <div
+                  className="book-window relative w-full max-w-md bg-(--site-bg)"
+                  {...movable("book", {
+                    border: "2px solid var(--foreground)",
+                    boxShadow: "5px 5px 0 var(--foreground)",
+                  })}
+                  role="dialog"
+                  aria-label={shown.title}
+                >
+                  <div
+                    className="flex items-center justify-between gap-2 px-2 py-1 text-sm"
+                    style={{
+                      background: "var(--foreground)",
+                      color: "var(--site-bg)",
+                    }}
+                  >
+                    <span className="truncate">{shown.title}</span>
+                    <button
+                      type="button"
+                      onClick={() => setBookWindow(null)}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center border border-(--site-bg) bg-transparent p-0 leading-none transition-opacity hover:opacity-70"
+                      aria-label="close"
+                    >
+                      x
+                    </button>
+                  </div>
+
+                  <div className="flex gap-3 p-3">
+                    {shown.coverUrl ? (
+                      <img
+                        src={shown.coverUrl}
+                        alt={`${shown.title} cover`}
+                        className="shrink-0 border border-(--foreground)"
+                        style={{
+                          width: "112px",
+                          height: "168px",
+                          objectFit: "cover",
+                        }}
+                      />
+                    ) : null}
+                    <div className="min-w-0 flex-1 text-sm">
+                      <div className="text-base leading-tight">
+                        {shown.title}
+                      </div>
+                      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+                        {facts.map(([label, value]) => (
+                          <div key={label} className="contents">
+                            <dt className="opacity-70">{label}</dt>
+                            <dd className="m-0">{value}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    </div>
+                  </div>
+
+                  {description ? (
+                    <div
+                      className="mx-3 mb-3 max-h-28 overflow-y-auto border border-(--foreground) p-2 text-xs"
+                      style={{ lineHeight: 1.4 }}
+                    >
+                      {description}
+                    </div>
+                  ) : null}
+
+                  <div className="flex items-center justify-between border-t border-(--foreground) px-2 py-1 text-xs">
+                    <span>
+                      {bookWindowStatus === "loading"
+                        ? "loading details..."
+                        : bookWindowStatus === "error"
+                          ? "showing saved details"
+                          : ""}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()
+        : null}
+
       {colorsModalOpen ? (
         <div
           className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          {...backdropProps(() => setColorsModalOpen(false))}
           style={{ zIndex: 2147483647 }}
         >
           <div
-            className="relative w-full max-w-sm bg-white p-5"
-            style={{ border: "1px solid #235848" }}
+            className="relative w-full max-w-sm bg-(--site-bg) p-5"
+            {...movable("colors", { border: "1px solid var(--foreground)" })}
           >
             <button
               type="button"
@@ -2586,7 +2983,7 @@ export default function Home() {
                   updateSiteColor("background", event.target.value);
                 }}
                 aria-label="background color"
-                className="h-8 w-12 cursor-pointer border border-[#235848] bg-transparent p-0"
+                className="h-8 w-12 cursor-pointer border border-(--foreground) bg-transparent p-0"
               />
             </label>
             <label className="mt-3 flex cursor-pointer items-center justify-between gap-3">
@@ -2598,7 +2995,7 @@ export default function Home() {
                   updateSiteColor("text", event.target.value);
                 }}
                 aria-label="font color"
-                className="h-8 w-12 cursor-pointer border border-[#235848] bg-transparent p-0"
+                className="h-8 w-12 cursor-pointer border border-(--foreground) bg-transparent p-0"
               />
             </label>
           </div>
@@ -2608,12 +3005,13 @@ export default function Home() {
       {modalOpen ? (
         <div
           className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          {...backdropProps(dismissModal)}
           style={{ zIndex: 2147483647 }}
         >
           <form
             onSubmit={applyProfile}
-            className="relative w-full max-w-xl bg-white p-5"
-            style={{ border: "1px solid #235848" }}
+            className="relative w-full max-w-xl bg-(--site-bg) p-5"
+            {...movable("cursor", { border: "1px solid var(--foreground)" })}
           >
             <button
               type="button"
@@ -2629,7 +3027,7 @@ export default function Home() {
               value={nameInput}
               onChange={(event) => setNameInput(event.target.value)}
               placeholder="type your name"
-              className="mt-2 w-full border border-[#235848] px-3 py-2"
+              className="mt-2 w-full border border-(--foreground) px-3 py-2"
               autoComplete="off"
             />
 
@@ -2648,7 +3046,7 @@ export default function Home() {
                 }
               }}
               placeholder="search by book title or author"
-              className="mt-2 w-full border border-[#235848] px-3 py-2"
+              className="mt-2 w-full border border-(--foreground) px-3 py-2"
               autoComplete="off"
               spellCheck={false}
             />
@@ -2658,7 +3056,7 @@ export default function Home() {
             ) : null}
 
             {bookResults.length > 0 ? (
-              <div className="mt-2 max-h-56 overflow-auto border border-[#235848]">
+              <div className="mt-2 max-h-56 overflow-auto border border-(--foreground)">
                 {bookResults.map((book) => (
                   <button
                     key={book.id}
@@ -2666,9 +3064,9 @@ export default function Home() {
                     onClick={() => {
                       void chooseBook(book);
                     }}
-                    className="flex w-full items-center border-b border-[#235848] px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3]"
+                    className="flex w-full items-center border-b border-(--foreground) px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3]"
                   >
-                    <div className="mr-3 h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                    <div className="mr-3 h-14 w-10 shrink-0 overflow-hidden border border-(--foreground) bg-(--site-bg)">
                       {book.coverUrl ? (
                         <img
                           src={book.coverUrl}
@@ -2706,7 +3104,7 @@ export default function Home() {
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="submit"
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
+                className="border border-(--foreground) px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
               >
                 set
               </button>
@@ -2718,11 +3116,12 @@ export default function Home() {
       {addModalShelf ? (
         <div
           className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          {...backdropProps(dismissShelfAddModal)}
           style={{ zIndex: 2147483647 }}
         >
           <div
-            className="relative w-full max-w-xl bg-white p-5"
-            style={{ border: "1px solid #235848" }}
+            className="relative w-full max-w-xl bg-(--site-bg) p-5"
+            {...movable("add", { border: "1px solid var(--foreground)" })}
           >
             <button
               type="button"
@@ -2738,14 +3137,14 @@ export default function Home() {
               <button
                 type="button"
                 onClick={triggerAddModalCsvUpload}
-                className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+                className="border border-(--foreground) px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
               >
                 upload csv
               </button>
               <button
                 type="button"
                 onClick={triggerAddModalPasteUpload}
-                className="border border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+                className="border border-(--foreground) px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
               >
                 paste list
               </button>
@@ -2764,7 +3163,7 @@ export default function Home() {
                 }
               }}
               placeholder="search by book title or author"
-              className="mt-2 w-full border border-[#235848] px-3 py-2"
+              className="mt-2 w-full border border-(--foreground) px-3 py-2"
               autoComplete="off"
               spellCheck={false}
               autoFocus
@@ -2775,7 +3174,7 @@ export default function Home() {
             ) : null}
 
             {addResults.length > 0 ? (
-              <div className="mt-2 max-h-72 overflow-auto border border-[#235848]">
+              <div className="mt-2 max-h-72 overflow-auto border border-(--foreground)">
                 {addResults.map((book) => {
                   const isAdding = addingBookId === book.id;
 
@@ -2787,9 +3186,9 @@ export default function Home() {
                         void addBookFromSearch(book);
                       }}
                       disabled={isAdding}
-                      className="flex w-full items-center border-b border-[#235848] px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
+                      className="flex w-full items-center border-b border-(--foreground) px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
                     >
-                      <div className="mr-3 h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                      <div className="mr-3 h-14 w-10 shrink-0 overflow-hidden border border-(--foreground) bg-(--site-bg)">
                         {book.coverUrl ? (
                           <img
                             src={book.coverUrl}
@@ -2819,12 +3218,13 @@ export default function Home() {
       {editAuthOpen ? (
         <div
           className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          {...backdropProps(closeEditAuthModal)}
           style={{ zIndex: 2147483647 }}
         >
           <form
             onSubmit={submitEditAuth}
-            className="relative w-full max-w-sm bg-white p-5"
-            style={{ border: "1px solid #235848" }}
+            className="relative w-full max-w-sm bg-(--site-bg) p-5"
+            {...movable("auth", { border: "1px solid var(--foreground)" })}
           >
             <button
               type="button"
@@ -2844,7 +3244,7 @@ export default function Home() {
                 setEditAuthError(null);
               }}
               placeholder="password"
-              className="mt-2 w-full border border-[#235848] px-3 py-2"
+              className="mt-2 w-full border border-(--foreground) px-3 py-2"
               autoComplete="off"
               autoFocus
             />
@@ -2857,14 +3257,14 @@ export default function Home() {
               <button
                 type="button"
                 onClick={closeEditAuthModal}
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
+                className="border border-(--foreground) px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
               >
                 cancel
               </button>
               <button
                 type="submit"
                 disabled={editAuthLoading}
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
+                className="border border-(--foreground) px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
               >
                 {editAuthLoading ? "checking..." : "unlock"}
               </button>
@@ -2873,14 +3273,15 @@ export default function Home() {
         </div>
       ) : null}
 
-      {uploadMatchShelf ? (
+      {uploadMatchShelf && !uploadMatchHidden ? (
         <div
           className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          {...backdropProps(() => setUploadMatchHidden(true))}
           style={{ zIndex: 2147483647 }}
         >
           <div
-            className="relative w-full max-w-4xl bg-white p-5"
-            style={{ border: "1px solid #235848" }}
+            className="relative w-full max-w-4xl bg-(--site-bg) p-5"
+            {...movable("upload", { border: "1px solid var(--foreground)" })}
           >
             <button
               type="button"
@@ -2903,7 +3304,7 @@ export default function Home() {
               </div>
             ) : null}
 
-            <div className="mt-4 max-h-[65vh] overflow-auto border border-[#235848]">
+            <div className="mt-4 max-h-[65vh] overflow-auto border border-(--foreground)">
               {displayedUploadRows.length === 0 ? (
                 <div className="p-3 text-sm">
                   all unmatched rows were handled. click done to close.
@@ -2920,7 +3321,7 @@ export default function Home() {
                 return (
                   <div
                     key={row.id}
-                    className="border-b border-[#235848] p-3 last:border-b-0"
+                    className="border-b border-(--foreground) p-3 last:border-b-0"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="text-sm font-medium">
@@ -2936,7 +3337,7 @@ export default function Home() {
                               toggleUploadRowSearch(row.id, row.sourceTitle);
                             }}
                             disabled={isImportingThisRow || isImportedThisRow}
-                            className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3]"
+                            className="border border-(--foreground) px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3]"
                             aria-label={`search ${row.sourceTitle}`}
                           >
                             ⌕
@@ -2949,7 +3350,7 @@ export default function Home() {
                               retryUploadRow(row.id);
                             }}
                             disabled={isImportingThisRow}
-                            className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+                            className="border border-(--foreground) px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
                           >
                             retry
                           </button>
@@ -2960,7 +3361,7 @@ export default function Home() {
                             deleteUploadMatchRow(row.id);
                           }}
                           disabled={isImportingThisRow}
-                          className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3]"
+                          className="border border-(--foreground) px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3]"
                           aria-label={`delete ${row.sourceTitle}`}
                         >
                           x delete
@@ -2980,14 +3381,14 @@ export default function Home() {
                               selectUploadCandidate(row.id, candidate.id);
                             }}
                             disabled={isImportingThisRow || isImportedThisRow}
-                            className="flex items-center gap-2 border border-[#235848] px-2 py-1 text-left transition-colors hover:bg-[#dbe3c3]"
+                            className="flex items-center gap-2 border border-(--foreground) px-2 py-1 text-left transition-colors hover:bg-[#dbe3c3]"
                             style={{
                               backgroundColor: isSelected
                                 ? "#dbe3c3"
                                 : undefined,
                             }}
                           >
-                            <div className="h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                            <div className="h-14 w-10 shrink-0 overflow-hidden border border-(--foreground) bg-(--site-bg)">
                               {candidate.coverUrl ? (
                                 <img
                                   src={candidate.coverUrl}
@@ -3026,7 +3427,7 @@ export default function Home() {
                     ) : null}
 
                     {row.candidates.length === 0 && rowSearchState?.open ? (
-                      <div className="mt-3 border border-[#235848] p-2">
+                      <div className="mt-3 border border-(--foreground) p-2">
                         <div className="flex items-center gap-2">
                           <input
                             value={rowSearchState.query}
@@ -3037,7 +3438,7 @@ export default function Home() {
                               );
                             }}
                             placeholder="search by title"
-                            className="w-full border border-[#235848] px-2 py-1 text-xs"
+                            className="w-full border border-(--foreground) px-2 py-1 text-xs"
                             autoComplete="off"
                           />
                           <button
@@ -3052,7 +3453,7 @@ export default function Home() {
                               rowSearchState.query.trim().length <
                                 MIN_QUERY_LENGTH
                             }
-                            className="border border-[#235848] px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+                            className="border border-(--foreground) px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
                           >
                             {rowSearchState.loading ? "searching..." : "search"}
                           </button>
@@ -3076,9 +3477,9 @@ export default function Home() {
                                 disabled={
                                   isImportingThisRow || isImportedThisRow
                                 }
-                                className="flex items-center gap-2 border border-[#235848] px-2 py-1 text-left transition-colors hover:bg-[#dbe3c3]"
+                                className="flex items-center gap-2 border border-(--foreground) px-2 py-1 text-left transition-colors hover:bg-[#dbe3c3]"
                               >
-                                <div className="h-14 w-10 shrink-0 overflow-hidden border border-[#235848] bg-white">
+                                <div className="h-14 w-10 shrink-0 overflow-hidden border border-(--foreground) bg-(--site-bg)">
                                   {candidate.coverUrl ? (
                                     <img
                                       src={candidate.coverUrl}
@@ -3111,7 +3512,7 @@ export default function Home() {
                 type="button"
                 onClick={closeUploadMatchModal}
                 disabled={uploadImporting || hasAnyRowImporting}
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+                className="border border-(--foreground) px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
               >
                 done
               </button>
@@ -3123,12 +3524,13 @@ export default function Home() {
       {pasteModalShelf ? (
         <div
           className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          {...backdropProps(dismissPasteUploadModal)}
           style={{ zIndex: 2147483647 }}
         >
           <form
             onSubmit={submitPastedUploadList}
-            className="relative w-full max-w-2xl bg-white p-5"
-            style={{ border: "1px solid #235848" }}
+            className="relative w-full max-w-2xl bg-(--site-bg) p-5"
+            {...movable("paste", { border: "1px solid var(--foreground)" })}
           >
             <button
               type="button"
@@ -3153,7 +3555,7 @@ export default function Home() {
               placeholder={
                 "Dune\nThe Left Hand of Darkness\nHow Should a Person Be?, Sheila Heti"
               }
-              className="mt-3 h-72 w-full border border-[#235848] px-3 py-2"
+              className="mt-3 h-72 w-full border border-(--foreground) px-3 py-2"
               spellCheck={false}
               autoFocus
             />
@@ -3166,14 +3568,14 @@ export default function Home() {
               <button
                 type="button"
                 onClick={closePasteUploadModal}
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
+                className="border border-(--foreground) px-3 py-2 transition-colors hover:bg-[#dbe3c3]"
               >
                 cancel
               </button>
               <button
                 type="submit"
                 disabled={pasteUploadText.trim().length === 0}
-                className="border border-[#235848] px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
+                className="border border-(--foreground) px-3 py-2 transition-colors hover:bg-[#dbe3c3] disabled:cursor-not-allowed disabled:opacity-70"
               >
                 find matches
               </button>
@@ -3186,7 +3588,7 @@ export default function Home() {
         className="z-10 bg-(--site-bg)"
         style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
-        <div className="border-t border-[#235848] bg-(--site-bg) px-3 py-2 text-base">
+        <div className="border-t border-(--foreground) bg-(--site-bg) px-3 py-2 text-base">
           jordan&apos;s stacks
         </div>
         {renderShelfSection("currentlyReading", "currently reading")}
