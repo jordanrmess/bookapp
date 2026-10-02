@@ -2549,7 +2549,7 @@ export default function Home() {
             }}
             className="border border-[#235848] bg-(--site-bg) px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
           >
-            set cursor
+            set my cursor
           </button>
         </div>
       </div>
