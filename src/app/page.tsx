@@ -2576,9 +2576,7 @@ export default function Home() {
               x
             </button>
 
-            <div className="text-lg">site colors</div>
-            <div className="mt-1 text-sm">changes are shared with everyone</div>
-
+            <div className="text-lg">color picker</div>
             <label className="mt-4 flex cursor-pointer items-center justify-between gap-3">
               <span>background</span>
               <input
