@@ -791,6 +791,7 @@ function isHexColor(value: unknown): value is string {
 
 export default function Home() {
   const [modalOpen, setModalOpen] = useState(false);
+  const [colorsModalOpen, setColorsModalOpen] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [bookQuery, setBookQuery] = useState("");
   const [bookResults, setBookResults] = useState<BookSuggestion[]>([]);
@@ -848,6 +849,7 @@ export default function Home() {
     null,
   );
   const siteColorWriteTimeoutRef = useRef<number | null>(null);
+  const pendingSiteColorsRef = useRef<Partial<SiteColors>>({});
   const lastPersistedShelfSnapshotRef = useRef<string | null>(null);
   const pendingShelfMutationRef = useRef<(() => void | Promise<void>) | null>(
     null,
@@ -890,16 +892,25 @@ export default function Home() {
 
   function updateSiteColor(key: keyof SiteColors, value: string) {
     // Preview locally right away; the shared write is debounced so dragging
-    // through the picker doesn't flood the room with updates.
+    // through the picker doesn't flood the room with updates. Pending values
+    // are tracked per color so changing one never drops the other's write.
     setSiteColors((current) => ({ ...current, [key]: value }));
+    pendingSiteColorsRef.current[key] = value;
 
     if (siteColorWriteTimeoutRef.current !== null) {
       window.clearTimeout(siteColorWriteTimeoutRef.current);
     }
     siteColorWriteTimeoutRef.current = window.setTimeout(() => {
       siteColorWriteTimeoutRef.current = null;
+      const pending = pendingSiteColorsRef.current;
+      pendingSiteColorsRef.current = {};
       siteColorsHandleRef.current?.setData((draft) => {
-        draft[key] = value;
+        if (pending.background) {
+          draft.background = pending.background;
+        }
+        if (pending.text) {
+          draft.text = pending.text;
+        }
       });
     }, SITE_COLOR_WRITE_DELAY_MS);
   }
@@ -2501,41 +2512,33 @@ export default function Home() {
         />
         <div className="text-lg">stacks</div>
         <div className="flex items-center gap-2">
-          <div
-            id={SITE_COLORS_ELEMENT_ID}
-            className="flex items-center border border-[#235848] bg-(--site-bg)"
+          <div id={SITE_COLORS_ELEMENT_ID} hidden />
+          <button
+            type="button"
+            onClick={() => {
+              setColorsModalOpen(true);
+            }}
+            className="flex items-center justify-center border border-[#235848] bg-(--site-bg) p-1.5 transition-colors hover:bg-[#dbe3c3]"
+            aria-label="site colors"
+            title="site colors"
           >
-            <label
-              className="flex cursor-pointer items-center gap-2 px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
-              title="background color"
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
             >
-              <span>background</span>
-              <input
-                type="color"
-                value={siteColors.background}
-                onChange={(event) => {
-                  updateSiteColor("background", event.target.value);
-                }}
-                aria-label="background color"
-                className="h-5 w-5 cursor-pointer border border-[#235848] bg-transparent p-0"
-              />
-            </label>
-            <label
-              className="flex cursor-pointer items-center gap-2 border-l border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
-              title="font color"
-            >
-              <span>font</span>
-              <input
-                type="color"
-                value={siteColors.text}
-                onChange={(event) => {
-                  updateSiteColor("text", event.target.value);
-                }}
-                aria-label="font color"
-                className="h-5 w-5 cursor-pointer border border-[#235848] bg-transparent p-0"
-              />
-            </label>
-          </div>
+              <path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.8-.8 1.8-1.7 0-.5-.2-.8-.4-1.1-.3-.3-.4-.6-.4-1 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5c0-4-4-7.6-9-7.6Z" />
+              <circle cx="7.5" cy="11" r="1" fill="currentColor" />
+              <circle cx="10.5" cy="7" r="1" fill="currentColor" />
+              <circle cx="15" cy="7.5" r="1" fill="currentColor" />
+            </svg>
+          </button>
           <button
             type="button"
             onClick={() => {
@@ -2552,6 +2555,57 @@ export default function Home() {
       </div>
 
       <div className="flex-1" />
+
+      {colorsModalOpen ? (
+        <div
+          className="fixed inset-0 flex items-center justify-center bg-black/45 p-4"
+          style={{ zIndex: 2147483647 }}
+        >
+          <div
+            className="relative w-full max-w-sm bg-white p-5"
+            style={{ border: "1px solid #235848" }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setColorsModalOpen(false);
+              }}
+              className="absolute right-2 top-2 border-0 bg-transparent p-0 text-base leading-none transition-opacity hover:opacity-70"
+              aria-label="close"
+            >
+              x
+            </button>
+
+            <div className="text-lg">site colors</div>
+            <div className="mt-1 text-sm">changes are shared with everyone</div>
+
+            <label className="mt-4 flex cursor-pointer items-center justify-between gap-3">
+              <span>background</span>
+              <input
+                type="color"
+                value={siteColors.background}
+                onChange={(event) => {
+                  updateSiteColor("background", event.target.value);
+                }}
+                aria-label="background color"
+                className="h-8 w-12 cursor-pointer border border-[#235848] bg-transparent p-0"
+              />
+            </label>
+            <label className="mt-3 flex cursor-pointer items-center justify-between gap-3">
+              <span>font</span>
+              <input
+                type="color"
+                value={siteColors.text}
+                onChange={(event) => {
+                  updateSiteColor("text", event.target.value);
+                }}
+                aria-label="font color"
+                className="h-8 w-12 cursor-pointer border border-[#235848] bg-transparent p-0"
+              />
+            </label>
+          </div>
+        </div>
+      ) : null}
 
       {modalOpen ? (
         <div
