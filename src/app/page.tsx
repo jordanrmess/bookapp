@@ -2,7 +2,11 @@
 
 import "playhtml/dist/style.css";
 import { useEffect, useRef, useState } from "react";
-import type { PlayHTMLComponents, PresenceView } from "playhtml";
+import type {
+  PlayElementHandle,
+  PlayHTMLComponents,
+  PresenceView,
+} from "playhtml";
 import {
   getAnonymousShelfKey,
   getSupabaseClient,
@@ -144,6 +148,7 @@ const CURSOR_WIDTH = 51;
 const CURSOR_HEIGHT = 72;
 const CURSOR_BORDER_RADIUS = 9;
 const SHELF_BOOK_DRAG_MIME = "application/x-booksrus-shelf-book";
+const TOUCH_MOUSE_GUARD_MS = 320;
 
 type CursorIdentity = {
   imageUrl: string | null;
@@ -768,6 +773,22 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
   }
 }
 
+type SiteColors = {
+  background: string;
+  text: string;
+};
+
+const DEFAULT_SITE_COLORS: SiteColors = {
+  background: "#c8ef65",
+  text: "#235848",
+};
+const SITE_COLORS_ELEMENT_ID = "site-colors";
+const SITE_COLOR_WRITE_DELAY_MS = 150;
+
+function isHexColor(value: unknown): value is string {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
+}
+
 export default function Home() {
   const [modalOpen, setModalOpen] = useState(false);
   const [nameInput, setNameInput] = useState("");
@@ -822,6 +843,11 @@ export default function Home() {
   const [pasteModalShelf, setPasteModalShelf] = useState<ShelfKey | null>(null);
   const [pasteUploadText, setPasteUploadText] = useState("");
   const [pasteUploadError, setPasteUploadError] = useState<string | null>(null);
+  const [siteColors, setSiteColors] = useState<SiteColors>(DEFAULT_SITE_COLORS);
+  const siteColorsHandleRef = useRef<PlayElementHandle<SiteColors> | null>(
+    null,
+  );
+  const siteColorWriteTimeoutRef = useRef<number | null>(null);
   const lastPersistedShelfSnapshotRef = useRef<string | null>(null);
   const pendingShelfMutationRef = useRef<(() => void | Promise<void>) | null>(
     null,
@@ -847,6 +873,36 @@ export default function Home() {
   const hasAnyRowImporting = Object.values(uploadRowImportState).some(
     (state) => state.status === "importing",
   );
+
+  useEffect(() => {
+    const root = document.documentElement.style;
+    root.setProperty("--site-bg", siteColors.background);
+    root.setProperty("--foreground", siteColors.text);
+  }, [siteColors]);
+
+  useEffect(() => {
+    return () => {
+      if (siteColorWriteTimeoutRef.current !== null) {
+        window.clearTimeout(siteColorWriteTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  function updateSiteColor(key: keyof SiteColors, value: string) {
+    // Preview locally right away; the shared write is debounced so dragging
+    // through the picker doesn't flood the room with updates.
+    setSiteColors((current) => ({ ...current, [key]: value }));
+
+    if (siteColorWriteTimeoutRef.current !== null) {
+      window.clearTimeout(siteColorWriteTimeoutRef.current);
+    }
+    siteColorWriteTimeoutRef.current = window.setTimeout(() => {
+      siteColorWriteTimeoutRef.current = null;
+      siteColorsHandleRef.current?.setData((draft) => {
+        draft[key] = value;
+      });
+    }, SITE_COLOR_WRITE_DELAY_MS);
+  }
 
   useEffect(() => {
     const styleId = "playhtml-hide-default-cursor-labels";
@@ -882,6 +938,25 @@ export default function Home() {
       }
 
       playRef.current = playhtml;
+
+      // Shared across every visitor. `update` only reads shared data into
+      // React state; writes happen from the color inputs.
+      siteColorsHandleRef.current = playhtml.register<SiteColors>(
+        SITE_COLORS_ELEMENT_ID,
+        {
+          defaultData: DEFAULT_SITE_COLORS,
+          update: ({ data }) => {
+            setSiteColors({
+              background: isHexColor(data?.background)
+                ? data.background
+                : DEFAULT_SITE_COLORS.background,
+              text: isHexColor(data?.text)
+                ? data.text
+                : DEFAULT_SITE_COLORS.text,
+            });
+          },
+        },
+      );
 
       playhtml.init({
         cursors: {
@@ -950,6 +1025,8 @@ export default function Home() {
     return () => {
       isMounted = false;
       unsubscribePresence?.();
+      siteColorsHandleRef.current?.unregister();
+      siteColorsHandleRef.current = null;
       playRef.current = null;
     };
   }, []);
@@ -1004,16 +1081,62 @@ export default function Home() {
     nameTag.style.zIndex = "2147483647";
     cursor.appendChild(nameTag);
 
-    const syncPosition = (event: MouseEvent) => {
-      cursor.style.transform = `translate(${event.clientX + 10}px, ${event.clientY - 8}px)`;
+    const setCursorPosition = (
+      x: number,
+      y: number,
+      movement: "instant" | "glide",
+    ) => {
+      cursor.style.transition =
+        movement === "glide"
+          ? "transform 220ms cubic-bezier(0.22, 1, 0.36, 1)"
+          : "none";
+      cursor.style.transform = `translate(${x + 10}px, ${y - 8}px)`;
+    };
+
+    let lastTouchAt = 0;
+
+    const syncMousePosition = (event: MouseEvent) => {
+      if (performance.now() - lastTouchAt < TOUCH_MOUSE_GUARD_MS) {
+        return;
+      }
+
+      setCursorPosition(event.clientX, event.clientY, "instant");
+    };
+
+    const syncTouchPosition = (event: TouchEvent) => {
+      const point = event.touches[0] ?? event.changedTouches[0];
+      if (!point) {
+        return;
+      }
+
+      lastTouchAt = performance.now();
+
+      setCursorPosition(point.clientX, point.clientY, "glide");
+
+      // Keep shared cursor listeners in sync on touch-only devices.
+      window.dispatchEvent(
+        new MouseEvent("mousemove", {
+          clientX: point.clientX,
+          clientY: point.clientY,
+          bubbles: true,
+        }),
+      );
     };
 
     document.body.appendChild(cursor);
     localCursorElementRef.current = cursor;
-    window.addEventListener("mousemove", syncPosition);
+    window.addEventListener("mousemove", syncMousePosition);
+    window.addEventListener("touchstart", syncTouchPosition, {
+      passive: true,
+    });
+    window.addEventListener("touchmove", syncTouchPosition, {
+      passive: true,
+    });
 
     return () => {
-      window.removeEventListener("mousemove", syncPosition);
+      window.removeEventListener("mousemove", syncMousePosition);
+      window.removeEventListener("touchstart", syncTouchPosition);
+      window.removeEventListener("touchmove", syncTouchPosition);
       cursor.remove();
       if (localCursorElementRef.current === cursor) {
         localCursorElementRef.current = null;
@@ -1084,6 +1207,72 @@ export default function Home() {
       document.body.classList.remove("profile-modal-open");
     };
   }, [isAnyModalOpen]);
+
+  useEffect(() => {
+    const shouldAllowDrag = (target: EventTarget | null) => {
+      if (!(target instanceof Element)) {
+        return false;
+      }
+
+      return Boolean(
+        target.closest(
+          '[draggable="true"], input, textarea, button, select, [contenteditable="true"]',
+        ),
+      );
+    };
+
+    const preventBackgroundDrag = (event: DragEvent) => {
+      if (shouldAllowDrag(event.target)) {
+        return;
+      }
+
+      event.preventDefault();
+    };
+
+    document.addEventListener("dragstart", preventBackgroundDrag);
+
+    return () => {
+      document.removeEventListener("dragstart", preventBackgroundDrag);
+    };
+  }, []);
+
+  useEffect(() => {
+    let touchStartY = 0;
+    let touchStartX = 0;
+
+    const onTouchStart = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (!touch) {
+        return;
+      }
+
+      touchStartY = touch.clientY;
+      touchStartX = touch.clientX;
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (!touch) {
+        return;
+      }
+
+      const deltaY = touch.clientY - touchStartY;
+      const deltaX = touch.clientX - touchStartX;
+      const isVerticalSwipe = Math.abs(deltaY) > Math.abs(deltaX);
+
+      if (window.scrollY <= 0 && deltaY > 0 && isVerticalSwipe) {
+        event.preventDefault();
+      }
+    };
+
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+
+    return () => {
+      window.removeEventListener("touchstart", onTouchStart);
+      window.removeEventListener("touchmove", onTouchMove);
+    };
+  }, []);
 
   useEffect(() => {
     const normalized = bookQuery.trim();
@@ -2156,7 +2345,7 @@ export default function Home() {
 
     return (
       <section
-        className="border-t border-[#235848] bg-[#c8ef65] px-3 py-2"
+        className="border-t border-[#235848] bg-(--site-bg) px-3 py-2"
         onDragOver={(event) => {
           handleShelfDragOver(event, shelf);
         }}
@@ -2296,10 +2485,13 @@ export default function Home() {
 
   return (
     <main
-      className="relative min-h-screen bg-[#c8ef65]"
-      style={{ paddingBottom: "360px" }}
+      className="flex h-[100svh] flex-col overflow-hidden bg-(--site-bg)"
+      style={{ minHeight: "100svh" }}
     >
-      <div className="absolute left-3 right-3 top-3 z-20 flex items-center justify-between gap-3">
+      <div
+        className="z-20 flex items-center justify-between gap-3 px-3 pb-2"
+        style={{ paddingTop: "max(env(safe-area-inset-top), 0.75rem)" }}
+      >
         <input
           ref={csvInputRef}
           type="file"
@@ -2308,19 +2500,58 @@ export default function Home() {
           className="hidden"
         />
         <div className="text-lg">stacks</div>
-        <button
-          type="button"
-          onClick={() => {
-            setModalOpen(true);
-            setModalError(null);
-            setNameInput(activeName);
-            setBookQuery(selectedBook?.title ?? "");
-          }}
-          className="border border-[#235848] bg-[#c8ef65] px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
-        >
-          set cursor
-        </button>
+        <div className="flex items-center gap-2">
+          <div
+            id={SITE_COLORS_ELEMENT_ID}
+            className="flex items-center border border-[#235848] bg-(--site-bg)"
+          >
+            <label
+              className="flex cursor-pointer items-center gap-2 px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+              title="background color"
+            >
+              <span>background</span>
+              <input
+                type="color"
+                value={siteColors.background}
+                onChange={(event) => {
+                  updateSiteColor("background", event.target.value);
+                }}
+                aria-label="background color"
+                className="h-5 w-5 cursor-pointer border border-[#235848] bg-transparent p-0"
+              />
+            </label>
+            <label
+              className="flex cursor-pointer items-center gap-2 border-l border-[#235848] px-2 py-1 transition-colors hover:bg-[#dbe3c3]"
+              title="font color"
+            >
+              <span>font</span>
+              <input
+                type="color"
+                value={siteColors.text}
+                onChange={(event) => {
+                  updateSiteColor("text", event.target.value);
+                }}
+                aria-label="font color"
+                className="h-5 w-5 cursor-pointer border border-[#235848] bg-transparent p-0"
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setModalOpen(true);
+              setModalError(null);
+              setNameInput(activeName);
+              setBookQuery(selectedBook?.title ?? "");
+            }}
+            className="border border-[#235848] bg-(--site-bg) px-3 py-1 transition-colors hover:bg-[#dbe3c3]"
+          >
+            set cursor
+          </button>
+        </div>
       </div>
+
+      <div className="flex-1" />
 
       {modalOpen ? (
         <div
@@ -2899,8 +3130,11 @@ export default function Home() {
         </div>
       ) : null}
 
-      <section className="fixed bottom-0 left-0 right-0 z-10 bg-[#c8ef65]">
-        <div className="border-t border-[#235848] bg-[#c8ef65] px-3 py-2 text-base">
+      <section
+        className="z-10 bg-(--site-bg)"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
+        <div className="border-t border-[#235848] bg-(--site-bg) px-3 py-2 text-base">
           jordan&apos;s stacks
         </div>
         {renderShelfSection("currentlyReading", "currently reading")}
