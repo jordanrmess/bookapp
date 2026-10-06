@@ -3,7 +3,7 @@ create extension if not exists "pgcrypto";
 create table if not exists public.shelves (
   id uuid primary key default gen_random_uuid(),
   anonymous_key text not null,
-  shelf_name text not null check (shelf_name in ('wantToRead', 'currentlyReading', 'booksRead')),
+  shelf_name text not null check (shelf_name in ('wantToRead', 'currentlyReading', 'booksRead', 'goated')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (anonymous_key, shelf_name)
@@ -24,6 +24,18 @@ create table if not exists public.books (
   slug text,
   created_at timestamptz not null default now()
 );
+
+-- Hidden books show only `display_title` on the shelf. Nullable so rows
+-- inserted alongside a hidden book (which omit these columns) store null.
+alter table public.books
+  add column if not exists hidden boolean default false;
+
+alter table public.books
+  add column if not exists display_title text;
+
+-- Reading notes shown in the book window.
+alter table public.books
+  add column if not exists notes text;
 
 create index if not exists shelves_anonymous_key_idx on public.shelves (anonymous_key);
 create index if not exists books_shelf_id_idx on public.books (shelf_id);
@@ -48,7 +60,7 @@ alter table public.shelves
 
 alter table public.shelves
   add constraint shelves_shelf_name_check
-  check (shelf_name in ('wantToRead', 'currentlyReading', 'booksRead'));
+  check (shelf_name in ('wantToRead', 'currentlyReading', 'booksRead', 'goated'));
 
 create or replace function public.update_updated_at_column()
 returns trigger as $$

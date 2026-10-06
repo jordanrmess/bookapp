@@ -1,6 +1,10 @@
 import { createClient } from "@supabase/supabase-js";
 
-export type ShelfName = "wantToRead" | "currentlyReading" | "booksRead";
+export type ShelfName =
+  | "wantToRead"
+  | "currentlyReading"
+  | "booksRead"
+  | "goated";
 
 const ANONYMOUS_SHELF_KEY = "booksrus-anonymous-shelf-key";
 const CONFIGURED_ANONYMOUS_SHELF_KEY =

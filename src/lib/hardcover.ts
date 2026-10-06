@@ -10,6 +10,7 @@ type SearchBookRow = {
   title?: string | null;
   author_names?: unknown;
   slug?: string | null;
+  genres?: unknown;
 };
 
 type SearchResultsContainer = {
@@ -50,6 +51,7 @@ export type BookSuggestion = {
   authors: string;
   slug: string | null;
   coverUrl: string | null;
+  genre: string | null;
 };
 
 export type BookDetails = {
@@ -173,6 +175,20 @@ function formatAuthors(
   return names.length > 0 ? names.join(", ") : "Unknown author";
 }
 
+// Search documents list genres most-tagged first, e.g. ["Science Fiction"].
+function getPrimaryGenre(genres: unknown) {
+  if (!Array.isArray(genres)) {
+    return null;
+  }
+
+  const genre = genres.find(
+    (value): value is string =>
+      typeof value === "string" && value.trim().length > 0,
+  );
+
+  return genre?.trim() ?? null;
+}
+
 function normalizeSearchRows(rawResults: unknown): SearchBookRow[] {
   if (Array.isArray(rawResults)) {
     return rawResults.flatMap((item) => {
@@ -272,6 +288,7 @@ export async function searchBooks(query: string) {
       authors: formatAuthors(row.author_names),
       slug: row.slug ?? null,
       coverUrl: null,
+      genre: getPrimaryGenre(row.genres),
     }))
     .filter((row) => row.id.length > 0);
 

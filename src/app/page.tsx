@@ -12,6 +12,7 @@ import {
   getSupabaseClient,
   type ShelfName,
 } from "@/lib/supabase";
+import { SITE_COLORS_STORAGE_KEY } from "@/lib/site-colors";
 
 type BookSuggestion = {
   id: string;
@@ -19,6 +20,7 @@ type BookSuggestion = {
   authors: string;
   slug: string | null;
   coverUrl: string | null;
+  genre?: string | null;
 };
 
 type BookDetails = {
@@ -37,6 +39,11 @@ type UploadedCsvBook = {
   sourceTitle: string;
   sourceAuthor: string | null;
   book: BookDetails | null;
+  // Hidden books show only `displayTitle` on the shelf: no cover, real title,
+  // or book window.
+  hidden?: boolean;
+  displayTitle?: string | null;
+  notes?: string | null;
 };
 
 type CsvBookInput = {
@@ -66,8 +73,13 @@ type UploadRowImportState = {
   message: string;
 };
 
-type ShelfKey = "wantToRead" | "currentlyReading" | "booksRead";
-const SHELF_ORDER: ShelfKey[] = ["currentlyReading", "wantToRead", "booksRead"];
+type ShelfKey = "wantToRead" | "currentlyReading" | "booksRead" | "goated";
+const SHELF_ORDER: ShelfKey[] = [
+  "currentlyReading",
+  "wantToRead",
+  "booksRead",
+  "goated",
+];
 
 type ShelfState = {
   books: UploadedCsvBook[];
@@ -121,6 +133,12 @@ function mapUploadedBookToDbRow(shelfId: string, item: UploadedCsvBook) {
     description: book?.description ?? null,
     rating: book?.rating ?? null,
     slug: book?.slug ?? null,
+    // Only sent for hidden books, so shelves still save on databases that
+    // haven't run the hidden/display_title migration yet.
+    ...(item.hidden
+      ? { hidden: true, display_title: item.displayTitle ?? null }
+      : {}),
+    ...(item.notes ? { notes: item.notes } : {}),
   };
 }
 
@@ -135,10 +153,21 @@ function mapDbRowToUploadedBook(row: Record<string, unknown>): UploadedCsvBook {
     sourceTitle,
     sourceAuthor,
     book,
+    hidden: row.hidden === true,
+    displayTitle:
+      typeof row.display_title === "string" ? row.display_title : null,
+    notes: typeof row.notes === "string" ? row.notes : null,
   };
 }
 
 const MIN_QUERY_LENGTH = 2;
+const DEFAULT_HIDDEN_DISPLAY_TITLE = "untitled book";
+
+function getDefaultHiddenDisplayTitle(book: BookSuggestion) {
+  return book.genre
+    ? `untitled ${book.genre} book`.toLowerCase()
+    : DEFAULT_HIDDEN_DISPLAY_TITLE;
+}
 const UPLOAD_SEARCH_MAX_ATTEMPTS = 3;
 const UPLOAD_SEARCH_RETRY_DELAY_MS = 220;
 const CURSOR_IMAGE_CHANNEL = "bookCursorImage";
@@ -550,6 +579,9 @@ type SupabaseBookInsertRow = {
   description: string | null;
   rating: number | null;
   slug: string | null;
+  hidden?: boolean;
+  display_title?: string | null;
+  notes?: string | null;
 };
 
 type SupabaseTableClient = {
@@ -573,6 +605,7 @@ type SupabaseTableClient = {
   };
   delete: () => {
     eq: (column: string, value: string) => Promise<SupabaseQueryResult<null>>;
+    in: (column: string, values: string[]) => Promise<SupabaseQueryResult<null>>;
   };
   insert: (rows: SupabaseBookInsertRow[]) => Promise<SupabaseQueryResult<null>>;
 };
@@ -587,23 +620,21 @@ function createShelfState(): ShelfState {
 }
 
 function serializeShelfState(shelves: Record<ShelfKey, ShelfState>) {
-  return JSON.stringify({
-    wantToRead: shelves.wantToRead.books.map((item) => ({
-      sourceTitle: item.sourceTitle,
-      sourceAuthor: item.sourceAuthor,
-      book: item.book,
-    })),
-    currentlyReading: shelves.currentlyReading.books.map((item) => ({
-      sourceTitle: item.sourceTitle,
-      sourceAuthor: item.sourceAuthor,
-      book: item.book,
-    })),
-    booksRead: shelves.booksRead.books.map((item) => ({
-      sourceTitle: item.sourceTitle,
-      sourceAuthor: item.sourceAuthor,
-      book: item.book,
-    })),
-  });
+  return JSON.stringify(
+    Object.fromEntries(
+      SHELF_ORDER.map((shelf) => [
+        shelf,
+        shelves[shelf].books.map((item) => ({
+          sourceTitle: item.sourceTitle,
+          sourceAuthor: item.sourceAuthor,
+          book: item.book,
+          hidden: item.hidden ?? false,
+          displayTitle: item.displayTitle ?? null,
+          notes: item.notes ?? null,
+        })),
+      ]),
+    ),
+  );
 }
 
 async function loadShelfState() {
@@ -646,6 +677,7 @@ async function loadShelfState() {
     wantToRead: createShelfState(),
     currentlyReading: createShelfState(),
     booksRead: createShelfState(),
+    goated: createShelfState(),
   };
 
   if (shelfMap.size > 0) {
@@ -732,43 +764,43 @@ async function saveShelfState(nextShelves: Record<ShelfKey, ShelfState>) {
       continue;
     }
 
-    const { error: deleteError } = (await client
+    // Insert the new rows before deleting the old ones, so a failed insert
+    // leaves the shelf as it was instead of emptying it.
+    const { data: existingRows, error: existingError } = (await supabaseTables
       .from("books")
-      .delete()
-      .eq("shelf_id", shelfRow.id)) as {
-      error: { message: string } | null;
-    };
+      .select("id")
+      .eq("shelf_id", shelfRow.id)) as SupabaseQueryResult<Array<{ id: string }>>;
 
-    if (deleteError) {
-      throw deleteError;
+    if (existingError) {
+      throw existingError;
     }
 
-    if (shelf.books.length === 0) {
+    if (shelf.books.length > 0) {
+      const bookRows: SupabaseBookInsertRow[] = shelf.books.map((item) =>
+        mapUploadedBookToDbRow(shelfRow.id, item),
+      );
+
+      const { error: insertError } = (await supabaseTables
+        .from("books")
+        .insert(bookRows)) as SupabaseQueryResult<null>;
+
+      if (insertError) {
+        throw insertError;
+      }
+    }
+
+    const staleIds = (existingRows ?? []).map((row) => row.id);
+    if (staleIds.length === 0) {
       continue;
     }
 
-    const bookRows = shelf.books.map((item) =>
-      mapUploadedBookToDbRow(shelfRow.id, item),
-    ) as Array<{
-      shelf_id: string;
-      source_title: string;
-      source_author: string | null;
-      title: string | null;
-      authors: string | null;
-      cover_url: string | null;
-      pages: number | null;
-      release_year: number | null;
-      description: string | null;
-      rating: number | null;
-      slug: string | null;
-    }>;
-
-    const { error: insertError } = (await supabaseTables
+    const { error: deleteError } = await supabaseTables
       .from("books")
-      .insert(bookRows)) as SupabaseQueryResult<null>;
+      .delete()
+      .in("id", staleIds);
 
-    if (insertError) {
-      throw insertError;
+    if (deleteError) {
+      throw deleteError;
     }
   }
 }
@@ -837,6 +869,27 @@ function isHexColor(value: unknown): value is string {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
 }
 
+// Matches what the inline script in app/layout.tsx applied before paint, so
+// the first effect run doesn't flip the page back to the defaults.
+function readCachedSiteColors(): SiteColors {
+  if (typeof window === "undefined") {
+    return DEFAULT_SITE_COLORS;
+  }
+  try {
+    const cached = JSON.parse(
+      localStorage.getItem(SITE_COLORS_STORAGE_KEY) ?? "null",
+    );
+    return {
+      background: isHexColor(cached?.background)
+        ? cached.background
+        : DEFAULT_SITE_COLORS.background,
+      text: isHexColor(cached?.text) ? cached.text : DEFAULT_SITE_COLORS.text,
+    };
+  } catch {
+    return DEFAULT_SITE_COLORS;
+  }
+}
+
 export default function Home() {
   const [modalOpen, setModalOpen] = useState(false);
   const [colorsModalOpen, setColorsModalOpen] = useState(false);
@@ -847,6 +900,12 @@ export default function Home() {
   const [bookWindowStatus, setBookWindowStatus] = useState<
     "loading" | "done" | "error"
   >("loading");
+  // The shelf entry the book window was opened from, for saving notes.
+  const [bookWindowItem, setBookWindowItem] = useState<{
+    shelf: ShelfKey;
+    titleKey: string;
+  } | null>(null);
+  const [bookNotesDraft, setBookNotesDraft] = useState("");
   const [nameInput, setNameInput] = useState("");
   const [bookQuery, setBookQuery] = useState("");
   const [bookResults, setBookResults] = useState<BookSuggestion[]>([]);
@@ -861,6 +920,7 @@ export default function Home() {
     wantToRead: createShelfState(),
     currentlyReading: createShelfState(),
     booksRead: createShelfState(),
+    goated: createShelfState(),
   });
   const [addModalShelf, setAddModalShelf] = useState<ShelfKey | null>(null);
   const [addQuery, setAddQuery] = useState("");
@@ -868,12 +928,18 @@ export default function Home() {
   const [addSearchLoading, setAddSearchLoading] = useState(false);
   const [addModalError, setAddModalError] = useState<string | null>(null);
   const [addingBookId, setAddingBookId] = useState<string | null>(null);
+  // Alternate titles keyed by search result id; a key is present only while
+  // that result's stealth mode box is checked.
+  const [addStealthTitles, setAddStealthTitles] = useState<
+    Record<string, string>
+  >({});
   const [collapsedShelves, setCollapsedShelves] = useState<
     Record<ShelfKey, boolean>
   >({
     wantToRead: true,
-    currentlyReading: true,
+    currentlyReading: false,
     booksRead: true,
+    goated: true,
   });
   const [editAuthOpen, setEditAuthOpen] = useState(false);
   const [editPassword, setEditPassword] = useState("");
@@ -899,13 +965,16 @@ export default function Home() {
   const [pasteModalShelf, setPasteModalShelf] = useState<ShelfKey | null>(null);
   const [pasteUploadText, setPasteUploadText] = useState("");
   const [pasteUploadError, setPasteUploadError] = useState<string | null>(null);
-  const [siteColors, setSiteColors] = useState<SiteColors>(DEFAULT_SITE_COLORS);
+  const [siteColors, setSiteColors] = useState<SiteColors>(readCachedSiteColors);
   const siteColorsHandleRef = useRef<PlayElementHandle<SiteColors> | null>(
     null,
   );
   const siteColorWriteTimeoutRef = useRef<number | null>(null);
   const pendingSiteColorsRef = useRef<Partial<SiteColors>>({});
   const lastPersistedShelfSnapshotRef = useRef<string | null>(null);
+  // Saves run one at a time; overlapping saves would each re-insert the
+  // shelf and leave duplicate rows.
+  const shelfSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingShelfMutationRef = useRef<(() => void | Promise<void>) | null>(
     null,
   );
@@ -943,8 +1012,14 @@ export default function Home() {
 
   useEffect(() => {
     const root = document.documentElement.style;
+    root.setProperty("--background", siteColors.background);
     root.setProperty("--site-bg", siteColors.background);
     root.setProperty("--foreground", siteColors.text);
+    try {
+      localStorage.setItem(SITE_COLORS_STORAGE_KEY, JSON.stringify(siteColors));
+    } catch {
+      // Storage can be unavailable (private mode, blocked site data).
+    }
   }, [siteColors]);
 
   useEffect(() => {
@@ -1272,14 +1347,17 @@ export default function Home() {
       return;
     }
 
-    void (async () => {
+    shelfSaveQueueRef.current = shelfSaveQueueRef.current.then(async () => {
+      if (lastPersistedShelfSnapshotRef.current === nextSnapshot) {
+        return;
+      }
       try {
         await saveShelfState(shelves);
         lastPersistedShelfSnapshotRef.current = nextSnapshot;
       } catch (error) {
         console.error("[supabase] failed to save shelves", error);
       }
-    })();
+    });
   }, [shelves, shelvesLoaded]);
 
   useEffect(() => {
@@ -1509,10 +1587,17 @@ export default function Home() {
     };
   }, [bookWindow]);
 
-  function openBookWindow(book: BookDetails) {
+  function openBookWindow(
+    book: BookDetails,
+    shelf: ShelfKey,
+    titleKey: string,
+    notes: string | null,
+  ) {
     setBookWindowDetails(null);
     setBookWindowStatus("loading");
     setBookWindow(book);
+    setBookWindowItem({ shelf, titleKey });
+    setBookNotesDraft(notes ?? "");
   }
 
   async function chooseBook(book: BookSuggestion) {
@@ -1688,6 +1773,7 @@ export default function Home() {
     setAddSearchLoading(false);
     setAddModalError(null);
     setAddingBookId(null);
+    setAddStealthTitles({});
   }
 
   function dismissShelfAddModal() {
@@ -1704,6 +1790,7 @@ export default function Home() {
     setAddSearchLoading(false);
     setAddModalError(null);
     setAddingBookId(null);
+    setAddStealthTitles({});
   }
 
   function triggerAddModalCsvUpload() {
@@ -1792,13 +1879,17 @@ export default function Home() {
     }
   }
 
-  async function addBookToShelf(shelf: ShelfKey, book: BookSuggestion) {
+  async function addBookToShelf(
+    shelf: ShelfKey,
+    book: BookSuggestion,
+    displayTitle: string | null,
+  ) {
     setAddModalError(null);
     setAddingBookId(book.id);
     setShelfPatch(shelf, {
       loading: true,
       error: null,
-      submittingTitle: `${book.title} by ${book.authors}`,
+      submittingTitle: displayTitle ?? `${book.title} by ${book.authors}`,
     });
 
     try {
@@ -1821,6 +1912,7 @@ export default function Home() {
           sourceTitle: book.title,
           sourceAuthor: book.authors || null,
           book: payload.book,
+          ...(displayTitle !== null ? { hidden: true, displayTitle } : {}),
         },
       ]);
 
@@ -1845,8 +1937,14 @@ export default function Home() {
     }
 
     const shelf = addModalShelf;
+    const stealthTitle = addStealthTitles[book.id];
+    const displayTitle =
+      stealthTitle === undefined
+        ? null
+        : stealthTitle.trim().toLowerCase() ||
+          getDefaultHiddenDisplayTitle(book);
     requestShelfEditAuth(async () => {
-      await addBookToShelf(shelf, book);
+      await addBookToShelf(shelf, book, displayTitle);
     });
   }
 
@@ -2395,6 +2493,24 @@ export default function Home() {
     setActiveDropShelf(null);
   }
 
+  function setShelfBookNotes(
+    shelf: ShelfKey,
+    titleKey: string,
+    notes: string,
+  ) {
+    setShelves((current) => ({
+      ...current,
+      [shelf]: {
+        ...current[shelf],
+        books: current[shelf].books.map((item) =>
+          getUniqueTitleKey(item) === titleKey
+            ? { ...item, notes: notes.trim() ? notes : null }
+            : item,
+        ),
+      },
+    }));
+  }
+
   function removeShelfBookByKey(shelf: ShelfKey, titleKey: string) {
     setShelves((current) => ({
       ...current,
@@ -2661,6 +2777,11 @@ export default function Home() {
             <div className="flex min-w-max gap-2">
               {shelfState.books.map((item) => {
                 const itemKey = getUniqueTitleKey(item);
+                const hiddenTitle = item.hidden
+                  ? (
+                      item.displayTitle || DEFAULT_HIDDEN_DISPLAY_TITLE
+                    ).toLowerCase()
+                  : null;
                 const isDragged =
                   draggedShelfBook?.sourceShelf === shelf &&
                   draggedShelfBook.titleKey === itemKey;
@@ -2683,7 +2804,7 @@ export default function Home() {
                       );
                       event.dataTransfer.setData(
                         "text/plain",
-                        item.sourceTitle,
+                        hiddenTitle ?? item.sourceTitle,
                       );
                       setDraggedShelfBook(payload);
                     }}
@@ -2692,8 +2813,13 @@ export default function Home() {
                       if ((event.target as HTMLElement).closest("button")) {
                         return;
                       }
-                      if (item.book) {
-                        openBookWindow(item.book);
+                      if (item.book && hiddenTitle === null) {
+                        openBookWindow(
+                          item.book,
+                          shelf,
+                          itemKey,
+                          item.notes ?? null,
+                        );
                       }
                     }}
                     style={{
@@ -2701,7 +2827,26 @@ export default function Home() {
                       cursor: "grab",
                     }}
                   >
-                    {item.book?.coverUrl ? (
+                    {hiddenTitle !== null ? (
+                      <div
+                        className="group relative flex items-end border border-(--foreground) p-2 text-xs"
+                        style={{ width: "88px", height: "132px" }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            requestShelfEditAuth(() => {
+                              removeShelfBookByKey(shelf, itemKey);
+                            });
+                          }}
+                          className="absolute right-1 top-1 border-0 bg-transparent p-0 text-sm leading-none opacity-0 transition-opacity hover:opacity-100 group-hover:opacity-100"
+                          aria-label={`remove ${hiddenTitle}`}
+                        >
+                          x
+                        </button>
+                        <div className="break-words">{hiddenTitle}</div>
+                      </div>
+                    ) : item.book?.coverUrl ? (
                       <div className="group relative">
                         <button
                           type="button"
@@ -2859,13 +3004,15 @@ export default function Home() {
                 shown.releaseYear ? String(shown.releaseYear) : "unknown",
               ],
               ["pages", shown.pages ? String(shown.pages) : "unknown"],
-              [
-                "rating",
-                typeof shown.rating === "number"
-                  ? `${shown.rating.toFixed(1)} / 5`
-                  : "unrated",
-              ],
             ];
+            const notesItem = bookWindowItem
+              ? shelves[bookWindowItem.shelf].books.find(
+                  (item) =>
+                    getUniqueTitleKey(item) === bookWindowItem.titleKey,
+                )
+              : undefined;
+            const savedNotes = notesItem?.notes ?? "";
+            const notesChanged = bookNotesDraft !== savedNotes;
 
             return (
               <div
@@ -2934,6 +3081,43 @@ export default function Home() {
                       style={{ lineHeight: 1.4 }}
                     >
                       {description}
+                    </div>
+                  ) : null}
+
+                  {notesItem && bookWindowItem ? (
+                    <div className="mx-3 mb-3 text-sm">
+                      <label
+                        htmlFor="book-window-notes"
+                        className="mb-1 block opacity-70"
+                      >
+                        my notes
+                      </label>
+                      <textarea
+                        id="book-window-notes"
+                        value={bookNotesDraft}
+                        onChange={(event) => {
+                          setBookNotesDraft(event.target.value);
+                        }}
+                        rows={4}
+                        className="block w-full resize-y border border-(--foreground) bg-transparent p-2 text-xs"
+                        style={{ lineHeight: 1.4 }}
+                      />
+                      <div className="mt-1 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const { shelf, titleKey } = bookWindowItem;
+                            const notes = bookNotesDraft;
+                            requestShelfEditAuth(() => {
+                              setShelfBookNotes(shelf, titleKey, notes);
+                            });
+                          }}
+                          disabled={!notesChanged}
+                          className="border border-(--foreground) px-2 py-1 text-xs transition-colors hover:bg-[#dbe3c3] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+                        >
+                          {notesChanged ? "save notes" : "saved"}
+                        </button>
+                      </div>
                     </div>
                   ) : null}
 
@@ -3177,18 +3361,14 @@ export default function Home() {
               <div className="mt-2 max-h-72 overflow-auto border border-(--foreground)">
                 {addResults.map((book) => {
                   const isAdding = addingBookId === book.id;
+                  const stealthTitle = addStealthTitles[book.id];
 
                   return (
-                    <button
+                    <div
                       key={book.id}
-                      type="button"
-                      onClick={() => {
-                        void addBookFromSearch(book);
-                      }}
-                      disabled={isAdding}
-                      className="flex w-full items-center border-b border-(--foreground) px-3 py-2 text-left last:border-b-0 transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
+                      className="flex items-start gap-3 border-b border-(--foreground) px-3 py-2 last:border-b-0"
                     >
-                      <div className="mr-3 h-14 w-10 shrink-0 overflow-hidden border border-(--foreground) bg-(--site-bg)">
+                      <div className="h-14 w-10 shrink-0 overflow-hidden border border-(--foreground) bg-(--site-bg)">
                         {book.coverUrl ? (
                           <img
                             src={book.coverUrl}
@@ -3197,12 +3377,62 @@ export default function Home() {
                           />
                         ) : null}
                       </div>
-                      <div>
-                        {isAdding
-                          ? `adding ${book.title}...`
-                          : `${book.title} - ${book.authors}`}
+                      <div className="min-w-0 flex-1">
+                        <div>{`${book.title} - ${book.authors}`}</div>
+                        <label className="mt-1 flex w-fit cursor-pointer items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={stealthTitle !== undefined}
+                            onChange={(event) => {
+                              const { checked } = event.target;
+                              setAddStealthTitles((current) => {
+                                const next = { ...current };
+                                if (checked) {
+                                  next[book.id] =
+                                    getDefaultHiddenDisplayTitle(book);
+                                } else {
+                                  delete next[book.id];
+                                }
+                                return next;
+                              });
+                            }}
+                            className="cursor-pointer"
+                          />
+                          stealth mode
+                        </label>
+                        {stealthTitle !== undefined ? (
+                          <input
+                            value={stealthTitle}
+                            onChange={(event) => {
+                              const value = event.target.value.toLowerCase();
+                              setAddStealthTitles((current) => ({
+                                ...current,
+                                [book.id]: value,
+                              }));
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" && !isAdding) {
+                                addBookFromSearch(book);
+                              }
+                            }}
+                            placeholder={getDefaultHiddenDisplayTitle(book)}
+                            aria-label={`alternate title for ${book.title}`}
+                            className="mt-1 w-full border border-(--foreground) px-2 py-1 text-sm"
+                            autoComplete="off"
+                          />
+                        ) : null}
                       </div>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          addBookFromSearch(book);
+                        }}
+                        disabled={isAdding}
+                        className="shrink-0 border border-(--foreground) px-2 py-1 text-sm transition-colors hover:bg-[#dbe3c3] disabled:cursor-wait disabled:opacity-70"
+                      >
+                        {isAdding ? "adding..." : "add"}
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -3594,6 +3824,7 @@ export default function Home() {
         {renderShelfSection("currentlyReading", "currently reading")}
         {renderShelfSection("wantToRead", "want to read")}
         {renderShelfSection("booksRead", "read")}
+        {renderShelfSection("goated", "goated")}
       </section>
     </main>
   );
